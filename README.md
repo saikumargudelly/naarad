@@ -1,6 +1,6 @@
-# Naarad - Your Cat-like AI Companion 😺
+# Naarad - Your AI Companion 😺
 
-Naarad is a curious, cat-like AI assistant that helps you with tasks, answers questions, and understands images. Built with FastAPI, LangChain, and modern AI models.
+Naarad is a curious, AI assistant that helps you with tasks, answers questions, and understands images. Built with FastAPI, LangChain, and modern AI models.
 
 ## 🚀 Features
 
