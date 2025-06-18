@@ -1,26 +1,40 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 
 class Settings(BaseSettings):
     # OpenRouter Configuration
-    openrouter_api_key: str
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_API_KEY: str
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     
     # Together.ai Configuration
-    together_api_key: str
-    together_base_url: str = "https://api.together.xyz/v1"
+    TOGETHER_API_KEY: str
+    TOGETHER_BASE_URL: str = "https://api.together.xyz/v1"
     
     # Model configurations
-    reasoning_model: str = "mistralai/Mixtral-8x7B-Instruct-v0.1"
-    chat_model: str = "nousresearch/nous-hermes-2-mixtral-8x7b-dpo"
-    vision_model: str = "llava-hf/llava-1.6-vicuna-7b-hf"
+    REASONING_MODEL: str = "mistralai/Mixtral-8x7B-Instruct-v0.1"
+    CHAT_MODEL: str = "nousresearch/nous-hermes-2-mixtral-8x7b-dpo"
+    VISION_MODEL: str = "llava-hf/llava-1.6-vicuna-7b-hf"
     
     # Brave Search API
-    brave_api_key: str
+    BRAVE_API_KEY: str
     
-    # Supabase (optional)
-    supabase_url: Optional[str] = None
-    supabase_key: Optional[str] = None
+    # Supabase Configuration (Optional)
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_KEY: Optional[str] = None
+    
+    # Server Configuration
+    APP_ENV: str = "development"
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    ALLOWED_ORIGINS: str = "http://localhost:3000"
+    
+    # Groq API Configuration
+    GROQ_API_KEY: str
+    
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        """Convert comma-separated ALLOWED_ORIGINS string to list"""
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",")]
     
     class Config:
         env_file = ".env"

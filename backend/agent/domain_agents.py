@@ -1,22 +1,24 @@
-from typing import Dict, Any, List, Optional, Type
 from datetime import datetime, timedelta
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from typing import Dict, Any, List, Optional, Type, TypeVar, Callable
+from pydantic import BaseModel, Field
+import logging
+import json
+
+# LangChain imports
+from langchain.agents import AgentExecutor, create_react_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_openai import ChatOpenAI
-import json
-import re
-import logging
+from langchain_community.llms import Ollama
 
+# Local imports
+from llm.config import settings
+from .agent_registry import agent_registry, AgentRegistry, AgentInitializationError
+from .agents import BaseAgent, AgentConfig
+from .tools.base import BaseTool
 from .memory.memory_manager import memory_manager
-from .monitoring.agent_monitor import agent_monitor
-from .registry import AgentRegistry, AgentInitializationError
-from ..llm.config import settings
 
+# Configure logging
 logger = logging.getLogger(__name__)
-
-# Initialize the agent registry
-agent_registry = AgentRegistry()
 
 class DomainAgent:
     """Base class for all domain-specific agents."""
@@ -46,15 +48,27 @@ class DomainAgent:
             agent_registry.register(self.agent_name, self.__class__)
     
     @classmethod
-    def register(cls):
-        """Class method to register the agent with the registry."""
-        if not cls.agent_name:
-            raise ValueError("Agent class must define an agent_name")
-        agent_registry.register(cls.agent_name, cls)
-        return cls
+    def register(cls, agent_class=None):
+        """Class method to register the agent with the registry.
+        
+        Can be used as a decorator: @DomainAgent.register
+        or called directly: DomainAgent.register(MyAgentClass)
+        """
+        if agent_class is None:
+            # Used as a decorator
+            def wrapper(agent_cls):
+                if agent_cls.agent_name and not agent_registry.is_registered(agent_cls.agent_name):
+                    agent_registry.register(agent_cls.agent_name, agent_cls)
+                return agent_cls
+            return wrapper
+        else:
+            # Called directly
+            if cls.agent_name and not agent_registry.is_registered(cls.agent_name):
+                agent_registry.register(cls.agent_name, agent_class)
+            return agent_class
     
     def _create_llm(self, **kwargs):
-        """Create the language model for this agent.
+        """Create the language model for this agent using the configured service.
         
         Args:
             **kwargs: Additional arguments to pass to the LLM
@@ -62,14 +76,44 @@ class DomainAgent:
         Returns:
             An instance of the language model
         """
-        llm_kwargs = {
-            "openai_api_base": "https://openrouter.ai/api/v1",
-            "openai_api_key": settings.openrouter_api_key,
-            "model_name": settings.chat_model,
-            "temperature": self.default_temperature,
-            **kwargs
-        }
-        return ChatOpenAI(**llm_kwargs)
+        from langchain_openai import ChatOpenAI
+        from langchain_community.chat_models import ChatOpenAI as CommunityChatOpenAI
+        from langchain_groq import ChatGroq
+        from llm.config import settings
+        
+        # Remove any OpenAI-specific parameters
+        kwargs.pop('headers', None)
+        kwargs.pop('model_kwargs', None)
+        
+        # Default to Groq if API key is available
+        if hasattr(settings, 'GROQ_API_KEY') and settings.GROQ_API_KEY:
+            return ChatGroq(
+                model_name="mixtral-8x7b-32768",
+                temperature=self.default_temperature,
+                groq_api_key=settings.GROQ_API_KEY,
+                **{k: v for k, v in kwargs.items() if k not in ['headers', 'model_kwargs']}
+            )
+        # Fall back to OpenRouter if API key is available
+        elif hasattr(settings, 'OPENROUTER_API_KEY') and settings.OPENROUTER_API_KEY:
+            return ChatOpenAI(
+                model_name=settings.REASONING_MODEL,
+                temperature=self.default_temperature,
+                openai_api_key=settings.OPENROUTER_API_KEY,
+                openai_api_base=settings.OPENROUTER_BASE_URL,
+                headers={"HTTP-Referer": "http://localhost:3000"},
+                **{k: v for k, v in kwargs.items() if k not in ['headers', 'model_kwargs']}
+            )
+        # Fall back to Together.ai if API key is available
+        elif hasattr(settings, 'TOGETHER_API_KEY') and settings.TOGETHER_API_KEY:
+            return ChatOpenAI(
+                model_name=settings.REASONING_MODEL,
+                temperature=self.default_temperature,
+                openai_api_key=settings.TOGETHER_API_KEY,
+                openai_api_base=settings.TOGETHER_BASE_URL,
+                **{k: v for k, v in kwargs.items() if k not in ['headers', 'model_kwargs']}
+            )
+        else:
+            raise ValueError("No valid LLM API configuration found. Please set up GROQ_API_KEY, OPENROUTER_API_KEY, or TOGETHER_API_KEY in your environment.")
     
     def _create_agent(self) -> AgentExecutor:
         """Create the agent executor with proper configuration.
@@ -88,7 +132,8 @@ class DomainAgent:
                 MessagesPlaceholder("agent_scratchpad")
             ])
             
-            agent = create_openai_tools_agent(
+            # Create the agent using ReAct pattern
+            agent = create_react_agent(
                 llm=self.llm,
                 tools=self.tools,
                 prompt=prompt
@@ -101,7 +146,8 @@ class DomainAgent:
                 handle_parsing_errors=True,
                 max_iterations=5,
                 early_stopping_method="generate",
-                max_execution_time=30  # seconds
+                max_execution_time=30,  # seconds
+                return_intermediate_steps=True
             )
         except Exception as e:
             logger.error(f"Failed to create agent {self.name}: {str(e)}", exc_info=True)

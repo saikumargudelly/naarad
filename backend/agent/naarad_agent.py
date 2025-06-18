@@ -142,10 +142,17 @@ class NaaradAgent:
                     'message_count': context.metadata.get('message_count', 0) + 1
                 })
                 
-                # Save the updated context
+                # Prepare messages for saving
+                messages = [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": response}
+                ]
+                
+                # Save the updated context with messages
                 self.memory_manager.save_conversation(
                     conversation_id=context.conversation_id,
                     user_id=context.user_id,
+                    messages=messages,
                     metadata=context.metadata
                 )
                 

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
-from ..agent.naarad_agent import naarad_agent
+from agent.naarad_agent import naarad_agent
 
 router = APIRouter()
 

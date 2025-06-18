@@ -3,7 +3,7 @@ from datetime import datetime
 import time
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 import logging
-from ...llm.config import settings
+from llm.config import settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

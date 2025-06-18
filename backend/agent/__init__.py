@@ -4,6 +4,9 @@ This module contains the core agent implementations for the Naarad AI assistant,
 including the base agent, domain-specific agents, and the agent orchestrator.
 """
 
+# Import agent registry first to avoid circular imports
+from .agent_registry import agent_registry, AgentRegistry, AgentInitializationError
+
 # Import core agent components
 from .agents import (
     BaseAgent,
@@ -26,9 +29,6 @@ from .domain_agents import (
 # Import orchestrator
 from .orchestrator import AgentOrchestrator
 
-# Import registry
-from .registry import AgentRegistry, AgentInitializationError
-
 # Export public API
 __all__ = [
     # Core agents
@@ -50,6 +50,7 @@ __all__ = [
     'AgentOrchestrator',
     
     # Registry
+    'agent_registry',
     'AgentRegistry',
     'AgentInitializationError'
 ]
