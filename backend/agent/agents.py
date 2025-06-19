@@ -1,18 +1,60 @@
-from typing import Dict, Any, List, Optional, Type, TypeVar, Union
+from typing import Dict, Any, List, Optional, Type, TypeVar, Union, Sequence, Tuple
 from dataclasses import dataclass, field
 import logging
 import os
+import json
+import time
+import asyncio
 import traceback
+from datetime import datetime
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_core.agents import AgentAction, AgentFinish
-from langchain_core.tools import BaseTool
+
+# LangChain imports
+from langchain.agents import AgentExecutor, create_react_agent, tool as langchain_tool
+from langchain.agents.agent import AgentFinish, AgentAction, AgentStep
+from langchain.agents.format_scratchpad import format_log_to_str
+from langchain.agents.output_parsers import ReActSingleInputOutputParser
+from langchain.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.language_models import BaseLanguageModel
 from langchain_community.llms import Ollama
 
-# Create a simple React agent
-def create_react_agent(llm, tools, prompt):
-    return ReActChain(llm=llm, tools=tools)
+# Local imports
+from .types import AgentConfig, BaseAgent
+
+def create_react_agent(
+    llm: BaseLanguageModel,
+    tools: Sequence[BaseTool],
+    prompt: ChatPromptTemplate
+) -> AgentExecutor:
+    """Create a ReAct agent with the given LLM and tools.
+    
+    Args:
+        llm: The language model to use
+        tools: List of tools the agent can use
+        prompt: The prompt template to use
+        
+    Returns:
+        An AgentExecutor instance
+    """
+    # Format the tools for the prompt
+    tool_names = [tool.name for tool in tools]
+    tool_descriptions = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
+    
+    # Create the agent
+    agent = (
+        {
+            "input": lambda x: x["input"],
+            "agent_scratchpad": lambda x: format_log_to_str(x["intermediate_steps"]),
+            "tool_names": lambda x: ", ".join(tool_names),
+            "tool_descriptions": lambda x: tool_descriptions,
+        }
+        | prompt
+        | llm
+        | ReActSingleInputOutputParser()
+    )
+    
+    return AgentExecutor(agent=agent, tools=tools, verbose=True)
 
 from llm.config import settings
 
@@ -63,285 +105,428 @@ class BaseAgent:
         return self.config.description
     
     def _create_agent(self) -> AgentExecutor:
-        """Create and return a configured agent."""
-        from langchain.agents import AgentExecutor, Tool, ZeroShotAgent, initialize_agent
-        from langchain.agents.agent_types import AgentType
-        from langchain.agents.mrkl.prompt import FORMAT_INSTRUCTIONS
+        """Create and return a configured agent with proper tool handling."""
+        from langchain.agents import AgentExecutor, Tool, ZeroShotAgent
         from langchain.chains import LLMChain
         from langchain_core.prompts import PromptTemplate
         from langchain_openai import ChatOpenAI
-        from typing import List, Any, Dict, Union, Optional, Type, Tuple, Sequence
-        
-        # Get tool names for the prompt
-        tool_names = ", ".join([tool.name for tool in self.config.tools])
-        
-        # Create a prompt template for the ReAct agent
-        prompt = PromptTemplate.from_template(
-            """{system_prompt}
+        import os
+        import logging
 
-            Current conversation:
-            {chat_history}
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Get tool names for the prompt
+            tool_names = [tool.name for tool in self.config.tools] if self.config.tools else []
             
+            # Create the LLM instance with proper configuration
+            llm = ChatOpenAI(
+                model_name=self.config.model_name,
+                temperature=self.config.temperature,
+                openai_api_base="https://openrouter.ai/api/v1",
+                openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+                max_retries=3,
+                request_timeout=60,
+                streaming=False
+            )
+            
+            # Set custom headers for OpenRouter
+            headers = {
+                "HTTP-Referer": "https://github.com/saikumargudelly/naarad",
+                "X-Title": "Naarad"
+            }
+            if hasattr(llm, 'client') and hasattr(llm.client, '_client'):
+                llm.client._client.default_headers.update(headers)
+            
+            # Create the prompt template with clear instructions
+            prefix = f"""{self.config.system_prompt}
+
+            You have access to the following tools: {', '.join(tool_names) if tool_names else 'No tools available'}
+
+            Use the following format:
+
+            Question: the input question you must answer
+            Thought: you should always think about what to do
+            Action: the action to take, should be one of [{', '.join(tool_names) if tool_names else 'No tools available'}]
+            Action Input: the input to the action
+            Observation: the result of the action
+            ... (this Thought/Action/Action Input/Observation can repeat N times)
+            Thought: I now know the final answer
+            Final Answer: the final answer to the original input question"""
+
+            suffix = """Begin!
+
             Question: {input}
             {agent_scratchpad}"""
-        )
-        
-        # Create the LLM instance with proper header handling
-        headers = {
-            "HTTP-Referer": "https://github.com/your-github-username/your-repo-name",
-            "X-Title": "Naarad"
-        }
-        
-        # Create the LLM instance without headers first
-        llm = ChatOpenAI(
-            model_name=self.config.model_name,
-            temperature=self.config.temperature,
-            openai_api_base="https://openrouter.ai/api/v1",
-            openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-        )
-        
-        # Manually set the headers on the client
-        if hasattr(llm, 'client') and hasattr(llm.client, '_client'):
-            llm.client._client.default_headers.update(headers)
-        
-        # Create the prompt with the system message and tool instructions
-        prefix = f"""{self.config.system_prompt}
-
-        You have access to the following tools:"""
-        
-        suffix = """Begin!
-
-        Question: {input}
-        {agent_scratchpad}"""
-        
-        # Create the prompt template
-        prompt = ZeroShotAgent.create_prompt(
-            self.config.tools,
-            prefix=prefix,
-            suffix=suffix,
-            input_variables=["input", "agent_scratchpad"]
-        )
-        
-        # Create the LLM chain
-        llm_chain = LLMChain(llm=llm, prompt=prompt)
-        
-        # Create the agent
-        agent = ZeroShotAgent(llm_chain=llm_chain, tools=self.config.tools)
-        
-        # Create the agent executor
-        agent_executor = AgentExecutor.from_agent_and_tools(
-            agent=agent,
-            tools=self.config.tools,
-            verbose=self.config.verbose,
-            max_iterations=self.config.max_iterations,
-            handle_parsing_errors=True
-        )
-        
-        return agent_executor
+            
+            # Create the prompt template
+            prompt = ZeroShotAgent.create_prompt(
+                self.config.tools,
+                prefix=prefix,
+                suffix=suffix,
+                input_variables=["input", "agent_scratchpad"]
+            )
+            
+            # Create the LLM chain
+            llm_chain = LLMChain(
+                llm=llm,
+                prompt=prompt,
+                verbose=self.config.verbose
+            )
+            
+            # Create the agent
+            agent = ZeroShotAgent(
+                llm_chain=llm_chain,
+                tools=self.config.tools,
+                verbose=self.config.verbose,
+                handle_parsing_errors=True
+            )
+            
+            # Create the agent executor with proper configuration
+            agent_executor = AgentExecutor.from_agent_and_tools(
+                agent=agent,
+                tools=self.config.tools,
+                verbose=self.config.verbose,
+                max_iterations=min(self.config.max_iterations, 10),  # Cap at 10 iterations
+                handle_parsing_errors=True,
+                return_intermediate_steps=True,
+                early_stopping_method="generate"
+            )
+            
+            logger.info(f"Successfully created {self.name} agent with {len(tool_names)} tools")
+            return agent_executor
+            
+        except Exception as e:
+            logger.error(f"Error creating {self.name} agent: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize {self.name} agent: {str(e)}")
     
     async def process(self, input_text: str, **kwargs) -> Dict[str, Any]:
-        """Process input using the agent."""
+        """Process input using the agent with enhanced error handling and logging.
+        
+        Args:
+            input_text: The input text to process
+            **kwargs: Additional arguments including:
+                - chat_history: List of previous messages in the conversation
+                - intermediate_steps: List of (action, observation) tuples
+                - conversation_id: ID of the current conversation
+                - user_id: ID of the current user
+                
+        Returns:
+            Dict containing the response and metadata
+        """
+        start_time = time.time()
+        logger.info(f"[{self.name}] Processing input: {input_text[:100]}...")
+        
         try:
-            logger.info(f"Processing input with {self.name} agent: {input_text[:100]}...")
+            # Clean up and validate input
+            if not input_text or not isinstance(input_text, str):
+                raise ValueError("Input text must be a non-empty string")
+                
+            # Log the full input and kwargs for debugging
+            logger.debug(f"[{self.name}] Full input: {input_text}")
+            logger.debug(f"[{self.name}] Additional kwargs: {json.dumps({k: str(v)[:200] for k, v in kwargs.items()}, indent=2)}")
             
-            # Log the full input for debugging
-            logger.debug(f"Full input text: {input_text}")
-            logger.debug(f"Additional kwargs: {kwargs}")
-            
-            # Ensure we're not passing any OpenAI-specific parameters
-            invoke_kwargs = {k: v for k, v in kwargs.items() 
-                           if k not in ['headers', 'model_kwargs']}
-            
-            # Import required message types
-            from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, FunctionMessage
-            from langchain.agents.format_scratchpad import format_log_to_messages
-            from langchain.agents.output_parsers import ReActSingleInputOutputParser
-            
-            # Log the tools available to the agent
-            logger.debug(f"Agent {self.name} has {len(self.config.tools)} tools: {[t.name for t in self.config.tools]}")
-            
-            # Prepare the input with required variables
-            input_data = {
-                "input": input_text,
-                "agent_scratchpad": [],  # Will be populated with proper message types
-                **{k: v for k, v in invoke_kwargs.items() if k != 'intermediate_steps'}
+            # Prepare the input for the agent
+            invoke_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k not in ['headers', 'model_kwargs', 'callbacks']
             }
             
-            # Import required message types
-            from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, FunctionMessage
+            # Add conversation history if available
+            if 'chat_history' in invoke_kwargs and not invoke_kwargs['chat_history']:
+                del invoke_kwargs['chat_history']
             
-            # Import required message types
-            from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+            # Log tools available to the agent
+            tool_names = [t.name for t in self.config.tools] if hasattr(self.config, 'tools') and self.config.tools else []
+            logger.info(f"[{self.name}] Available tools: {tool_names}")
             
-            # Initialize agent_scratchpad as an empty list
-            agent_scratchpad = []
-            
-            # Handle intermediate steps if present
-            if 'intermediate_steps' in invoke_kwargs and invoke_kwargs['intermediate_steps']:
-                logger.debug(f"Processing with {len(invoke_kwargs['intermediate_steps'])} intermediate steps")
-                try:
-                    # Convert intermediate steps to messages
-                    steps = invoke_kwargs['intermediate_steps']
-                    for action, observation in steps:
-                        # Add the action message
-                        if isinstance(action, tuple) and len(action) == 2:
-                            action_msg = f"Action: {action[0]}\nAction Input: {action[1]}"
-                        else:
-                            action_msg = f"Action: {action}"
-                        agent_scratchpad.append(AIMessage(content=action_msg))
-                        
-                        # Add the observation message
-                        if isinstance(observation, str):
-                            agent_scratchpad.append(
-                                AIMessage(content=f"Observation: {observation}")
-                            )
-                        else:
-                            agent_scratchpad.append(
-                                AIMessage(content=f"Observation: {str(observation)}")
-                            )
-                    
-                    logger.debug(f"Formatted {len(agent_scratchpad)} messages in agent_scratchpad")
-                    
-                except Exception as e:
-                    logger.error(f"Error formatting agent_scratchpad: {str(e)}", exc_info=True)
-                    agent_scratchpad = [AIMessage(content="")]
-            else:
-                # Initialize with empty message if no intermediate steps
-                agent_scratchpad = [AIMessage(content="")]
-            
-            # Set the formatted agent_scratchpad in input_data
-            input_data['agent_scratchpad'] = agent_scratchpad
-                
-            # If there's chat history, add it to the input
-            if 'chat_history' in invoke_kwargs:
-                logger.debug(f"Including {len(invoke_kwargs['chat_history'])} messages from chat history")
-                input_data['chat_history'] = invoke_kwargs['chat_history']
-            
-            # Log the input data being sent to the agent
-            logger.debug(f"Agent input data: {input_data}")
-            
-            # Invoke the agent
-            logger.info("Invoking agent...")
+            # Process with the agent
             try:
-                result = await self.agent.ainvoke(input_data)
-                logger.info("Agent invocation complete")
-                logger.debug(f"Raw agent response type: {type(result)}")
-                logger.debug(f"Raw agent response: {result}")
+                logger.info(f"[{self.name}] Invoking agent with input: {input_text[:200]}...")
                 
-                # Log the structure of the result for debugging
-                if hasattr(result, '__dict__'):
-                    logger.debug(f"Result attributes: {vars(result)}")
-                elif isinstance(result, dict):
-                    logger.debug(f"Result keys: {result.keys()}")
+                # Add a timeout to prevent hanging
+                timeout_seconds = 60  # 1 minute timeout
+                
+                async def run_agent():
+                    return await self.agent.ainvoke({
+                        'input': input_text,
+                        **invoke_kwargs
+                    })
+                
+                # Run with timeout
+                try:
+                    result = await asyncio.wait_for(run_agent(), timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    raise TimeoutError(f"Agent execution timed out after {timeout_seconds} seconds")
+                
+                logger.info(f"[{self.name}] Agent execution completed successfully")
+                logger.debug(f"[{self.name}] Raw agent response: {json.dumps(str(result)[:500], indent=2)}")
                 
             except Exception as e:
-                logger.error(f"Error invoking agent: {str(e)}", exc_info=True)
-                raise
+                logger.error(f"[{self.name}] Error during agent execution: {str(e)}", exc_info=True)
+                raise RuntimeError(f"Agent execution failed: {str(e)}")
             
-            # Extract the output based on different possible response formats
-            output = None
-            
+            # Process the agent response
             try:
-                if isinstance(result, dict):
-                    logger.debug("Processing dictionary response")
-                    # Handle dictionary response
+                # Extract output from different response formats
+                output = None
+                
+                if hasattr(result, 'output') and result.output is not None:
+                    output = result.output
+                elif hasattr(result, 'content'):
+                    output = result.content
+                elif hasattr(result, 'text'):
+                    output = result.text
+                elif isinstance(result, (str, int, float, bool)):
+                    output = str(result)
+                elif isinstance(result, dict):
                     if 'output' in result:
                         output = result['output']
-                        logger.debug(f"Found output in 'output' key: {output}")
                     elif 'response' in result:
                         output = result['response']
-                        logger.debug(f"Found output in 'response' key: {output}")
                     elif 'message' in result:
                         output = result['message']
-                        logger.debug(f"Found output in 'message' key: {output}")
                     elif 'messages' in result and result['messages']:
-                        # Get the last message content if it exists
                         last_msg = result['messages'][-1]
                         if hasattr(last_msg, 'content'):
                             output = last_msg.content
-                            logger.debug(f"Found output in message.content: {output}")
                         elif isinstance(last_msg, dict) and 'content' in last_msg:
                             output = last_msg['content']
-                            logger.debug(f"Found output in message dict content: {output}")
                         else:
                             output = str(last_msg)
-                            logger.debug(f"Converted last message to string: {output}")
                     else:
-                        output = str(result)
-                        logger.debug(f"Converted entire result to string: {output}")
-                elif hasattr(result, 'output') and result.output is not None:
-                    output = result.output
-                    logger.debug(f"Found output in result.output: {output}")
-                elif hasattr(result, 'content'):
-                    output = result.content
-                    logger.debug(f"Found output in result.content: {output}")
-                elif hasattr(result, 'text'):
-                    output = result.text
-                    logger.debug(f"Found output in result.text: {output}")
-                elif isinstance(result, str):
-                    output = result
-                    logger.debug(f"Result is already a string: {output}")
-                else:
-                    output = str(result)
-                    logger.debug(f"Converted result to string: {output}")
+                        output = json.dumps(result, default=str)
                 
-                # Ensure output is a string
-                if not isinstance(output, str):
-                    logger.debug(f"Converting output to string from type: {type(output)}")
-                    output = str(output)
-                    
-                if not output.strip():
-                    logger.warning("Empty response from agent")
-                    raise ValueError("Empty response from agent")
-                    
+                # Ensure output is a non-empty string
+                if not output or not isinstance(output, str):
+                    output = str(output) if output is not None else ""
+                
+                # Clean up the output
+                output = output.strip()
+                
+                if not output:
+                    logger.warning(f"[{self.name}] Empty response from agent")
+                    output = "I received your message but didn't generate a response. Could you try rephrasing your question?"
+                
+                # Log processing time
+                processing_time = time.time() - start_time
+                logger.info(f"[{self.name}] Processing completed in {processing_time:.2f}s")
+                
+                # Prepare the response
+                response = {
+                    'success': True,
+                    'output': output,
+                    'agent_used': self.name,
+                    'metadata': {
+                        'model': self.config.model_name,
+                        'temperature': self.config.temperature,
+                        'processing_time_seconds': processing_time,
+                        'tools_used': tool_names,
+                        'response_length': len(output)
+                    }
+                }
+                
+                logger.debug(f"[{self.name}] Final response: {json.dumps({k: str(v)[:200] for k, v in response.items()}, indent=2)}")
+                return response
+                
             except Exception as e:
-                logger.error(f"Error extracting output from agent response: {str(e)}\nRaw response type: {type(result)}\nRaw response: {result}", exc_info=True)
-                output = f"I encountered an error processing the response: {str(e)}"
-                
-            # If output is empty, provide a default response
-            if not output.strip():
-                output = "I received your message but didn't generate a response. Could you try rephrasing your question?"
-                
-            logger.info(f"Agent {self.name} processing complete. Response length: {len(output) if output else 0} characters")
+                logger.error(f"[{self.name}] Error processing agent response: {str(e)}\nRaw response: {str(result)[:1000]}", exc_info=True)
+                raise RuntimeError(f"Failed to process agent response: {str(e)}")
+            
+        except Exception as e:
+            # Handle all other exceptions
+            processing_time = time.time() - start_time
+            error_msg = f"Error in {self.name} agent after {processing_time:.2f}s: {str(e)}"
+            logger.error(error_msg, exc_info=True)
             
             return {
-                'success': True,
-                'output': output,
+                'success': False,
+                'output': f"I encountered an error while processing your request with {self.name}. Please try again or rephrase your question.",
+                'error': str(e),
                 'agent_used': self.name,
                 'metadata': {
                     'model': self.config.model_name,
-                    'temperature': self.config.temperature,
-                    'tools_used': [tool.name for tool in self.config.tools] if hasattr(self.config, 'tools') else []
+                    'processing_time_seconds': processing_time,
+                    'error_type': type(e).__name__
                 }
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in {self.name} agent: {str(e)}", exc_info=True)
-            return {
-                'success': False,
-                'output': f"I encountered an error while processing your request with {self.name}.",
-                'error': str(e),
-                'agent_used': self.name,
-                'traceback': str(traceback.format_exc())
             }
 
 class ResearcherAgent(BaseAgent):
-    """Agent specialized in finding and gathering information."""
+    """Agent specialized in finding and gathering information from various sources.
+    
+    This agent is designed to handle research-intensive tasks by leveraging available tools
+    to gather, analyze, and synthesize information from multiple sources.
+    """
     
     def __init__(self, tools: List[Any] = None):
         from llm.config import settings
+        import os
+        
+        # Define research-specific system prompt
+        system_prompt = """You are a highly skilled research assistant with expertise in gathering and analyzing 
+        information from various sources. Your primary responsibilities include:
+        
+        1. Conducting thorough research using available tools
+        2. Verifying information from multiple sources
+        3. Providing clear, well-structured responses with proper citations
+        4. Distinguishing between facts, opinions, and speculations
+        5. Being transparent about the limitations of the information found
+        
+        When responding:
+        - Always cite your sources when possible
+        - Clearly indicate when information is from a specific source vs general knowledge
+        - If information is contradictory across sources, present multiple viewpoints
+        - Be concise but thorough in your responses
+        - Use bullet points or numbered lists for better readability when appropriate
+        - If you're unsure about something, say so rather than guessing
+        """
+        
+        # Check for required API keys
+        self.has_required_apis = True
+        missing_apis = []
+        
+        # Check for OpenRouter API key
+        if not os.getenv('OPENROUTER_API_KEY'):
+            missing_apis.append('OpenRouter')
+            self.has_required_apis = False
+            
+        # Check for other required API keys
+        if not os.getenv('BRAVE_API_KEY'):
+            missing_apis.append('Brave Search')
+            
+        if missing_apis:
+            system_prompt += "\n\nNOTE: The following API keys are missing: " + ", ".join(missing_apis) + ". "
+            system_prompt += "Some features may be limited. Please provide the missing API keys for full functionality."
+        
+        # Configure the agent
         config = AgentConfig(
             name="researcher",
             description="Specialized in finding and gathering information from various sources.",
-            model_name=settings.REASONING_MODEL,  # Use configured reasoning model
-            temperature=0.7,
-            system_prompt="""You are a research assistant. Your job is to find accurate and relevant information to answer questions. 
-            Use the available tools to search for information. Be thorough and objective in your research. 
-            Always cite your sources and provide links when available.""",
+            model_name=settings.REASONING_MODEL if os.getenv('OPENROUTER_API_KEY') else 'gpt-3.5-turbo',
+            temperature=0.3,  # Lower temperature for more focused, deterministic responses
+            system_prompt=system_prompt,
             tools=tools or [],
-            max_iterations=5
+            max_iterations=8,  # Allow more iterations for thorough research
+            verbose=True
         )
+        
+        # Initialize the base agent
         super().__init__(config)
+        
+        # Add research-specific logging
+        self.logger = logging.getLogger(f"ResearcherAgent")
+        self.search_count = 0
+        self.missing_apis = missing_apis
+        
+    async def process(self, input_text: str, **kwargs) -> Dict[str, Any]:
+        """Process a research query with enhanced research capabilities.
+        
+        Args:
+            input_text: The research query or question
+            **kwargs: Additional arguments including:
+                - chat_history: Previous messages in the conversation
+                - conversation_id: ID of the current conversation
+                - user_id: ID of the current user
+                
+        Returns:
+            Dict containing the research results and metadata
+        """
+        start_time = time.time()
+        self.logger.info(f"Processing research query: {input_text[:200]}...")
+        
+        try:
+            # Check for missing APIs
+            if not self.has_required_apis:
+                missing_apis = ", ".join(self.missing_apis)
+                return {
+                    'success': False,
+                    'output': f"I'm unable to process this request because the following required API keys are missing: {missing_apis}. "
+                             "Please provide the missing API keys in the .env file to enable full functionality.",
+                    'agent_used': 'researcher',
+                    'missing_apis': self.missing_apis
+                }
+            
+            # Pre-process the input
+            query = self._preprocess_query(input_text)
+            
+            # Track search operations
+            self.search_count += 1
+            
+            # Add research context to the input
+            research_context = {
+                'research_goal': query,
+                'search_depth': 'comprehensive',
+                'require_citations': True,
+                'max_sources': 3,
+                'current_step': 'initial_research',
+                'search_count': self.search_count
+            }
+            
+            # Add research context to the kwargs
+            kwargs['research_context'] = research_context
+            
+            # Process with the base agent
+            try:
+                result = await super().process(query, **kwargs)
+                
+                # Post-process the response
+                if result.get('success', False):
+                    result = self._postprocess_research(result)
+                
+                # Log completion
+                processing_time = time.time() - start_time
+                self.logger.info(f"Research completed in {processing_time:.2f}s")
+                
+                return result
+                
+            except Exception as e:
+                self.logger.error(f"Error in base agent processing: {str(e)}", exc_info=True)
+                return {
+                    'success': False,
+                    'output': "I encountered an error while processing your request. This might be due to missing or invalid API keys. "
+                             "Please check your configuration and try again.",
+                    'error': str(e),
+                    'agent_used': 'researcher'
+                }
+            
+        except Exception as e:
+            self.logger.error(f"Research error: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'output': "I encountered an error while conducting research. Please try again with a more specific query.",
+                'error': str(e),
+                'agent_used': 'researcher'
+            }
+    
+    def _preprocess_query(self, query: str) -> str:
+        """Preprocess the research query for better results."""
+        # Clean and normalize the query
+        query = query.strip()
+        
+        # Add research-specific instructions if not present
+        if not any(phrase in query.lower() for phrase in ['research', 'find', 'search', 'look up']):
+            query = f"Research and provide detailed information about: {query}"
+            
+        return query
+    
+    def _postprocess_research(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Post-process the research results for better presentation."""
+        if not result.get('success', False):
+            return result
+            
+        output = result.get('output', '')
+        
+        # Ensure the response includes citations if sources were used
+        if 'sources' in result.get('metadata', {}) and 'source:' not in output.lower():
+            sources = result['metadata']['sources']
+            if sources:
+                output += "\n\nSources:"
+                for i, source in enumerate(sources, 1):
+                    output += f"\n{i}. {source}"
+        
+        # Update the result with processed output
+        result['output'] = output
+        return result
 
 class AnalystAgent(BaseAgent):
     """Agent specialized in analyzing information and providing insights."""

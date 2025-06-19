@@ -1,21 +1,44 @@
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Type
 from datetime import datetime
 import json
 import logging
+import importlib
+import time
+import asyncio
+
+# LangChain imports
 from langchain.agents import AgentExecutor
+from langchain.agents.agent import AgentFinish, AgentAction, AgentStep
+from langchain.tools import BaseTool as LangChainBaseTool
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 
+# Local imports
 from .memory.memory_manager import memory_manager
 from .monitoring.agent_monitor import agent_monitor
-from .domain_agents import create_domain_agents
+from .types import BaseAgent, AgentConfig
+
+# Lazy imports to avoid circular dependencies
+_domain_agents = None
+
+def _get_domain_agents():
+    global _domain_agents
+    if _domain_agents is None:
+        from .domain_agents import create_domain_agents
+        _domain_agents = create_domain_agents()
+    return _domain_agents
 
 logger = logging.getLogger(__name__)
 
 class AgentOrchestrator:
-    def __init__(self, base_agents: Dict[str, AgentExecutor]):
-        """Initialize the orchestrator with base agents and domain agents."""
-        self.base_agents = base_agents
-        self.domain_agents = create_domain_agents()
+    def __init__(self, base_agents: Dict[str, AgentExecutor] = None):
+        """Initialize the orchestrator with base agents and domain agents.
+        
+        Args:
+            base_agents: Optional dictionary of base agents. If not provided,
+                       an empty dict will be used.
+        """
+        self.base_agents = base_agents or {}
+        self.domain_agents = _get_domain_agents()
         self.conversation_history = []
         self.current_topic = None
         self.last_interaction_time = datetime.utcnow()
@@ -210,9 +233,10 @@ class AgentOrchestrator:
         context: Dict[str, Any],
         conversation_id: str,
         user_id: str,
-        supporting_agents: List[str] = None
+        supporting_agents: List[str] = None,
+        fallback_agent: str = None
     ) -> Dict[str, Any]:
-        """Route the query to the appropriate agent.
+        """Route the query to the appropriate agent with enhanced error handling and fallback support.
         
         Args:
             agent_name: Primary agent to handle the request
@@ -220,57 +244,167 @@ class AgentOrchestrator:
             context: Additional context including any files or metadata
             conversation_id: ID of the current conversation
             user_id: ID of the current user
-            supporting_agents: List of additional agents that can assist
+            supporting_agents: List of additional agents that can assist if the primary agent needs help
+            fallback_agent: Optional fallback agent to try if all other agents fail
             
         Returns:
             Dict containing the response and metadata
         """
-        supporting_agents = supporting_agents or []
+        logger.info(f"[Orchestrator] Routing to agent: {agent_name}" +
+                   (f" with {len(supporting_agents or [])} supporting agents" if supporting_agents else ""))
         
-        # Special handling for researcher to include web search context
+        supporting_agents = supporting_agents or []
+        start_time = time.time()
+        
+        # Prepare context with routing information
+        context = context.copy()
+        context['routing'] = {
+            'primary_agent': agent_name,
+            'supporting_agents': supporting_agents,
+            'attempt_time': datetime.utcnow().isoformat()
+        }
+        
+        # Special handling for specific agent types
         if agent_name == 'researcher':
             context['search_performed'] = True
-            
-        # First, try to use a domain agent if available
-        if agent_name in self.domain_agents:
-            response = await self._process_with_domain_agent(
-                agent_name=agent_name,
-                user_input=user_input,
-                context=context,
-                conversation_id=conversation_id,
-                user_id=user_id
-            )
-        else:
-            # Use a base agent
-            response = await self._process_with_base_agent(
-                agent_name=agent_name,
-                user_input=user_input,
-                context=context,
-                conversation_id=conversation_id,
-                user_id=user_id
-            )
+            context['max_iterations'] = min(context.get('max_iterations', 8), 10)
+            logger.debug("[Orchestrator] Enabled search for researcher agent")
         
-        # If we have supporting agents and the primary agent needs help
-        if supporting_agents and response.get('needs_assistance', False):
-            for support_agent in supporting_agents:
-                if support_agent != agent_name:  # Don't call the same agent again
-                    support_response = await self._route_to_agent(
-                        agent_name=support_agent,
+        try:
+            # Try the primary agent first
+            if agent_name in self.domain_agents:
+                logger.debug(f"[Orchestrator] Using domain agent: {agent_name}")
+                response = await self._process_with_domain_agent(
+                    agent_name=agent_name,
+                    user_input=user_input,
+                    context=context,
+                    conversation_id=conversation_id,
+                    user_id=user_id
+                )
+            else:
+                logger.debug(f"[Orchestrator] Using base agent: {agent_name}")
+                response = await self._process_with_base_agent(
+                    agent_name=agent_name,
+                    user_input=user_input,
+                    context=context,
+                    conversation_id=conversation_id,
+                    user_id=user_id
+                )
+            
+            # Check if the response indicates a need for assistance
+            needs_assistance = (
+                not response.get('success', False) or
+                response.get('needs_assistance', False) or
+                (isinstance(response.get('output'), str) and 
+                 any(phrase in response['output'].lower() for phrase in 
+                     ['i don\'t know', 'i don\'t have enough information', 'i need help']))
+            )
+            
+            # If we have supporting agents and the primary agent needs help
+            if supporting_agents and needs_assistance:
+                logger.info(f"[Orchestrator] Primary agent {agent_name} needs assistance, trying {len(supporting_agents)} supporting agents")
+                
+                for i, support_agent in enumerate(supporting_agents, 1):
+                    if support_agent != agent_name:  # Don't call the same agent again
+                        logger.info(f"[Orchestrator] Trying supporting agent {i}/{len(supporting_agents)}: {support_agent}")
+                        
+                        # Update context with previous attempt info
+                        support_context = {
+                            **context,
+                            'previous_agent': agent_name,
+                            'previous_response': response,
+                            'attempt_count': i,
+                            'is_fallback': False
+                        }
+                        
+                        try:
+                            support_response = await self._route_to_agent(
+                                agent_name=support_agent,
+                                user_input=user_input,
+                                context=support_context,
+                                conversation_id=conversation_id,
+                                user_id=user_id,
+                                supporting_agents=[a for a in supporting_agents if a != support_agent]  # Don't retry agents
+                            )
+                            
+                            # If the supporting agent was successful, use its response
+                            if support_response.get('success', False):
+                                logger.info(f"[Orchestrator] Supporting agent {support_agent} provided a successful response")
+                                return support_response
+                                
+                        except Exception as e:
+                            logger.error(f"[Orchestrator] Error in supporting agent {support_agent}: {str(e)}", exc_info=True)
+                            continue
+            
+            # If we have a fallback agent and all else failed
+            if fallback_agent and (not response.get('success', False) or needs_assistance):
+                logger.info(f"[Orchestrator] All agents failed, trying fallback agent: {fallback_agent}")
+                try:
+                    fallback_response = await self._route_to_agent(
+                        agent_name=fallback_agent,
                         user_input=user_input,
                         context={
                             **context,
-                            'previous_agent': agent_name,
-                            'previous_response': response
+                            'is_fallback': True,
+                            'previous_attempts': [agent_name] + supporting_agents
                         },
                         conversation_id=conversation_id,
                         user_id=user_id
                     )
-                    
-                    # If the supporting agent was successful, use its response
-                    if support_response.get('success', False):
-                        return support_response
-        
-        return response
+                    if fallback_response.get('success', False):
+                        return fallback_response
+                except Exception as e:
+                    logger.error(f"[Orchestrator] Error in fallback agent {fallback_agent}: {str(e)}", exc_info=True)
+            
+            # Add routing metadata to the response
+            if isinstance(response, dict):
+                if 'metadata' not in response:
+                    response['metadata'] = {}
+                response['metadata'].update({
+                    'routing': {
+                        'primary_agent': agent_name,
+                        'supporting_agents_attempted': supporting_agents,
+                        'processing_time_seconds': time.time() - start_time,
+                        'used_fallback': fallback_agent if (not response.get('success', False) or needs_assistance) else None
+                    }
+                })
+            
+            return response
+            
+        except Exception as e:
+            error_msg = f"Error in agent routing for {agent_name}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            
+            # Try to use a fallback agent if available
+            if fallback_agent and fallback_agent != agent_name:
+                logger.info(f"[Orchestrator] Error in primary agent, trying fallback: {fallback_agent}")
+                try:
+                    return await self._route_to_agent(
+                        agent_name=fallback_agent,
+                        user_input=user_input,
+                        context={
+                            **context,
+                            'previous_error': str(e),
+                            'is_fallback': True
+                        },
+                        conversation_id=conversation_id,
+                        user_id=user_id
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"[Orchestrator] Fallback agent also failed: {str(fallback_error)}", exc_info=True)
+            
+            # If all else fails, return an error response
+            return {
+                'success': False,
+                'output': "I encountered an error while processing your request. Please try again.",
+                'error': error_msg,
+                'agent_used': agent_name,
+                'metadata': {
+                    'processing_time_seconds': time.time() - start_time,
+                    'error_type': type(e).__name__,
+                    'attempted_fallback': bool(fallback_agent and fallback_agent != agent_name)
+                }
+            }
     
     async def _process_with_base_agent(
         self,
@@ -280,41 +414,116 @@ class AgentOrchestrator:
         conversation_id: str,
         user_id: str
     ) -> Dict[str, Any]:
-        """Process a query with one of the base agents.
+        """Process a query with one of the base agents with enhanced error handling and logging.
         
-        Handles special cases like image analysis using the vision tool.
+        Args:
+            agent_name: Name of the agent to use
+            user_input: The user's input text
+            context: Additional context including any files or metadata
+            conversation_id: ID of the current conversation
+            user_id: ID of the current user
+            
+        Returns:
+            Dict containing the agent's response and metadata
         """
+        logger.info(f"[Orchestrator] Processing with base agent: {agent_name}")
+        start_time = time.time()
+        
+        # Validate agent exists
         if agent_name not in self.base_agents:
-            raise ValueError(f"Unknown base agent: {agent_name}")
+            error_msg = f"Unknown base agent: {agent_name}. Available agents: {list(self.base_agents.keys())}"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'output': f"I couldn't find the '{agent_name}' agent to handle your request.",
+                'error': error_msg,
+                'agent_used': agent_name,
+                'metadata': {
+                    'processing_time_seconds': time.time() - start_time,
+                    'error_type': 'agent_not_found'
+                }
+            }
             
         agent = self.base_agents[agent_name]
         
-        # Handle image analysis
-        if context.get('has_image', False) and agent_name == 'responder':
-            return await self._handle_image_analysis(user_input, context, conversation_id, user_id)
-        
-        # Prepare the input with conversation history
-        history = self._get_formatted_history(conversation_id, user_id)
-        
         try:
-            # For researcher, add web search context if needed
-            if agent_name == 'researcher' and not context.get('search_performed', False):
-                user_input = f"[Web search required] {user_input}"
+            # Handle special cases
+            if context.get('has_image', False) and agent_name == 'responder':
+                logger.info("[Orchestrator] Detected image in context, using image analysis")
+                return await self._handle_image_analysis(user_input, context, conversation_id, user_id)
             
-            response = await agent.process(
-                input_text=user_input,
-                chat_history=history,
+            # Prepare the input with conversation history
+            history = self._get_formatted_history(conversation_id, user_id)
+            
+            # Prepare context for the agent
+            process_kwargs = {
+                'input_text': user_input,
+                'chat_history': history,
+                'conversation_id': conversation_id,
+                'user_id': user_id,
                 **context
-            )
+            }
             
-            return response
+            # Special handling for researcher agent
+            if agent_name == 'researcher':
+                if not context.get('search_performed', False):
+                    process_kwargs['input_text'] = f"[Research required] {user_input}"
+                process_kwargs['max_iterations'] = min(context.get('max_iterations', 8), 10)
+            
+            # Log the processing details
+            logger.info(f"[Orchestrator] Invoking {agent_name} agent with input: {user_input[:200]}...")
+            logger.debug(f"[Orchestrator] Agent context: {json.dumps({k: str(v)[:200] for k, v in process_kwargs.items()}, indent=2)}")
+            
+            # Set a timeout for agent processing
+            try:
+                # Process with the agent
+                response = await asyncio.wait_for(
+                    agent.process(**process_kwargs),
+                    timeout=60  # 60 second timeout
+                )
+                
+                # Log the response
+                processing_time = time.time() - start_time
+                logger.info(f"[Orchestrator] {agent_name} agent completed in {processing_time:.2f}s")
+                
+                # Add processing metadata
+                if isinstance(response, dict):
+                    if 'metadata' not in response:
+                        response['metadata'] = {}
+                    response['metadata'].update({
+                        'processing_time_seconds': processing_time,
+                        'agent_used': agent_name,
+                        'model': getattr(agent, 'model_name', 'unknown')
+                    })
+                
+                return response
+                
+            except asyncio.TimeoutError:
+                error_msg = f"{agent_name} agent timed out after {time.time() - start_time:.2f}s"
+                logger.error(error_msg)
+                return {
+                    'success': False,
+                    'output': f"The {agent_name} agent took too long to respond. Please try again with a more specific query.",
+                    'error': error_msg,
+                    'agent_used': agent_name,
+                    'metadata': {
+                        'processing_time_seconds': time.time() - start_time,
+                        'error_type': 'timeout'
+                    }
+                }
             
         except Exception as e:
-            logger.error(f"Error in {agent_name} agent: {str(e)}", exc_info=True)
+            error_msg = f"Error in {agent_name} agent: {str(e)}"
+            logger.error(error_msg, exc_info=True)
             return {
                 'success': False,
-                'output': f"I encountered an error while processing your request with {agent_name}.",
-                'error': str(e)
+                'output': f"I encountered an error while processing your request with the {agent_name} agent.",
+                'error': error_msg,
+                'agent_used': agent_name,
+                'metadata': {
+                    'processing_time_seconds': time.time() - start_time,
+                    'error_type': type(e).__name__
+                }
             }
             
     async def _handle_image_analysis(

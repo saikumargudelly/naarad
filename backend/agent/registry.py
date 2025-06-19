@@ -4,13 +4,11 @@ from functools import lru_cache
 import logging
 import os
 
+from .types import AgentInitializationError
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
-
-class AgentInitializationError(Exception):
-    """Exception raised when an agent fails to initialize."""
-    pass
 
 class AgentRegistry(Generic[T]):
     """Generic registry for managing agent instances with lazy initialization."""
@@ -105,4 +103,7 @@ class AgentRegistry(Generic[T]):
     def clear_cache(self) -> None:
         """Clear all cached agent instances."""
         self._initialized_agents.clear()
-        logger.info("Cleared all agent instances from cache")
+        logger.info("Cleared all cached agent instances")
+
+# Create a singleton instance of AgentRegistry
+agent_registry = AgentRegistry()

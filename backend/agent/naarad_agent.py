@@ -1,43 +1,97 @@
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Type, TypeVar
 import os
 import uuid
 import json
 import logging
+import importlib
 from datetime import datetime
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
-from dotenv import load_dotenv
+# LangChain imports
 from langchain.agents import AgentExecutor
+from langchain.tools import BaseTool as LangChainBaseTool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
+# Local imports
+from dotenv import load_dotenv
 from .tools.vision_tool import LLaVAVisionTool
 from .tools.brave_search import BraveSearchTool
-from .orchestrator import AgentOrchestrator
-from .agents import (
-    create_base_agents,
-    ResearcherAgent,
-    AnalystAgent,
-    ResponderAgent,
-    QualityAgent
-)
 from .memory.memory_manager import memory_manager
 from .monitoring.agent_monitor import agent_monitor
+from .types import BaseAgent, AgentConfig, AgentInitializationError
+
+# Lazy imports to avoid circular dependencies
+_orchestrator = None
+_base_agents = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def get_orchestrator():
+    global _orchestrator
+    if _orchestrator is None:
+        from .orchestrator import AgentOrchestrator
+        _orchestrator = AgentOrchestrator()
+    return _orchestrator
+
+def get_base_agents():
+    global _base_agents
+    if _base_agents is None:
+        from .agents import (
+            create_base_agents,
+            ResearcherAgent,
+            AnalystAgent,
+            ResponderAgent,
+            QualityAgent
+        )
+        _base_agents = {
+            'researcher': ResearcherAgent,
+            'analyst': AnalystAgent,
+            'responder': ResponderAgent,
+            'quality': QualityAgent,
+            'create_base_agents': create_base_agents
+        }
+    return _base_agents
+
 class ConversationContext(BaseModel):
     """Represents the context for a conversation."""
-    user_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    conversation_id: str = Field(default_factory=lambda: f"conv_{uuid.uuid4().hex[:8]}")
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    model_config = ConfigDict(
+        extra='forbid',
+        validate_assignment=True,
+        json_encoders={
+            datetime: lambda v: v.isoformat()
+        }
+    )
     
-    def update_timestamp(self):
-        """Update the last updated timestamp."""
+    user_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier for the user"
+    )
+    conversation_id: str = Field(
+        default_factory=lambda: f"conv_{uuid.uuid4().hex[:8]}",
+        description="Unique identifier for the conversation"
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata for the conversation"
+    )
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the conversation was created"
+    )
+    updated_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the conversation was last updated"
+    )
+    
+    def update_timestamp(self) -> 'ConversationContext':
+        """Update the last updated timestamp.
+        
+        Returns:
+            ConversationContext: The updated conversation context
+        """
         self.updated_at = datetime.utcnow()
         return self
 
@@ -58,16 +112,30 @@ class NaaradAgent:
         responder_tools = [self.vision_tool]
         quality_tools = []
         
+        # Get base agent classes and creator function
+        from .agents import create_base_agents, get_agent_class
+        
         # Create base agents with appropriate tools
-        self.base_agents = {
-            'researcher': ResearcherAgent(tools=research_tools),
-            'analyst': AnalystAgent(tools=analysis_tools),
-            'responder': ResponderAgent(tools=responder_tools),
-            'quality': QualityAgent(tools=quality_tools)
+        self.base_agents = {}
+        agent_tools = {
+            'researcher': research_tools,
+            'analyst': analysis_tools,
+            'responder': responder_tools,
+            'quality': quality_tools
         }
         
+        # Create instances of each agent
+        for agent_name, tools in agent_tools.items():
+            agent_class = get_agent_class(agent_name)
+            if agent_class:
+                self.base_agents[agent_name] = agent_class(tools=tools)
+        
+        logger.info(f"Initialized {len(self.base_agents)} base agents: {list(self.base_agents.keys())}")
+        
         # Initialize orchestrator with the agents
-        self.orchestrator = AgentOrchestrator(self.base_agents)
+        self.orchestrator = get_orchestrator()
+        if hasattr(self.orchestrator, 'base_agents'):
+            self.orchestrator.base_agents = self.base_agents
         
         # System personality and constraints
         self.personality = {
@@ -117,9 +185,16 @@ class NaaradAgent:
         try:
             # Track the request
             with agent_monitor.track_request('naarad_agent'):
+                logger.info(f"Processing message in conversation {context.conversation_id}")
+                
                 # Process any images if provided
                 images = kwargs.get('images', [])
-                context = await self._process_images(images, context)
+                try:
+                    context = await self._process_images(images, context)
+                    logger.info(f"Processed {len(images)} images")
+                except Exception as e:
+                    logger.error(f"Error processing images: {str(e)}", exc_info=True)
+                    context.metadata['image_processing_error'] = str(e)
                 
                 # Prepare the context for processing
                 processing_context = {
@@ -129,12 +204,26 @@ class NaaradAgent:
                 }
                 
                 # Process the message through the orchestrator
-                response = await self.orchestrator.process_query(
-                    user_input=message,
-                    context=processing_context,
-                    conversation_id=context.conversation_id,
-                    user_id=context.user_id
-                )
+                try:
+                    logger.info(f"Sending to orchestrator: {message[:100]}...")
+                    response = await self.orchestrator.process_query(
+                        user_input=message,
+                        context=processing_context,
+                        conversation_id=context.conversation_id,
+                        user_id=context.user_id
+                    )
+                    logger.info(f"Received response from orchestrator")
+                except Exception as e:
+                    logger.error(f"Error in orchestrator: {str(e)}", exc_info=True)
+                    return {
+                        'success': False,
+                        'response': f"I encountered an error while processing your request: {str(e)}",
+                        'conversation_id': context.conversation_id,
+                        'metadata': {
+                            'error': str(e),
+                            'error_type': type(e).__name__
+                        }
+                    }
                 
                 # Update conversation metadata
                 context.metadata.update({

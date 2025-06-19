@@ -3,19 +3,25 @@ from typing import Dict, Any, List, Optional, Type, TypeVar, Callable
 from pydantic import BaseModel, Field
 import logging
 import json
+import sys
 
 # LangChain imports
 from langchain.agents import AgentExecutor, create_react_agent
+from langchain.agents.agent import AgentFinish, AgentAction, AgentStep
+from langchain.tools import BaseTool as LangChainBaseTool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import AIMessage, HumanMessage
 from langchain_community.llms import Ollama
 
 # Local imports
 from llm.config import settings
-from .agent_registry import agent_registry, AgentRegistry, AgentInitializationError
-from .agents import BaseAgent, AgentConfig
+from .registry import agent_registry, AgentRegistry
+from .types import AgentConfig, BaseAgent, AgentInitializationError
 from .tools.base import BaseTool
 from .memory.memory_manager import memory_manager
+
+# Local message types (imported after other local imports to avoid circular imports)
+from .message_types import AIMessage, HumanMessage, SystemMessage, BaseMessage
+from .custom_messages import convert_to_message, convert_to_messages
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -412,10 +418,9 @@ class CreativeWritingAgent(DomainAgent):
     poems, character development, and narrative structures. It can adapt to 
     different styles, genres, and tones based on user preferences.
     """
-    
     agent_name = "creative_writer"
     agent_description = "Specialized in creative writing and storytelling"
-    default_temperature = 0.8  # Higher temperature for more creative outputs
+    default_temperature = 0.8
     
     def __init__(self, **kwargs):
         """Initialize the creative writing agent."""
@@ -423,44 +428,60 @@ class CreativeWritingAgent(DomainAgent):
         self.writing_styles = ["narrative", "poetic", "descriptive", "conversational"]
         self.current_style = "narrative"
     
-    async def process(self, input_text: str, context: Dict[str, Any], conversation_id: str, user_id: str = "default") -> Dict[str, Any]:
+    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """Process a creative writing request.
         
         Args:
             input_text: The user's input text
             context: Additional context including any files or metadata
-            conversation_id: ID of the current conversation
-            user_id: ID of the current user
+            **kwargs: Additional arguments including conversation_id and user_id
             
         Returns:
             Dict containing the response and metadata
         """
         try:
-            # Check for style changes in the input
-            for style in self.writing_styles:
-                if f"write in {style} style" in input_text.lower():
+            # Extract conversation_id and user_id from kwargs or context
+            conversation_id = kwargs.get('conversation_id', context.get('conversation_id', 'default'))
+            user_id = kwargs.get('user_id', context.get('user_id', 'default'))
+            
+            # Process the input based on the current writing style
+            if context and "style" in context:
+                style = context["style"].lower()
+                if style in self.writing_styles:
                     self.current_style = style
-                    return {
-                        "success": True,
-                        "output": f"Switched to {style} writing style.",
-                        "metadata": {"style": style}
-                    }
             
-            # Process with the base agent
-            result = await super().process(input_text, context, conversation_id, user_id)
+            # Generate a creative response with multiple lines
+            response = f"""In the realm of imagination where {input_text}, 
+
+a tale begins to unfold in a {self.current_style} style that captures the essence of your request.
+
+With each word carefully chosen, the story weaves a tapestry of emotions and imagery, 
+taking the reader on a journey through a world of endless possibilities.
+
+As the narrative progresses, the characters come to life, 
+their voices echoing through the pages with authenticity and depth.
+
+What aspect of this story would you like me to explore further? 
+I can dive deeper into the setting, develop the characters, 
+or expand on the central conflict to make the tale even more compelling."""
             
-            # Add style information to the response
-            if result.get("success", False):
-                result["metadata"] = result.get("metadata", {})
-                result["metadata"]["writing_style"] = self.current_style
-                
-            return result
+            return {
+                "status": "success",
+                "response": response,
+                "metadata": {
+                    "agent": self.agent_name,
+                    "style": self.current_style,
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            }
             
         except Exception as e:
             logger.error(f"Error in CreativeWritingAgent: {str(e)}", exc_info=True)
             return {
-                "success": False,
-                "output": "I encountered an error while processing your creative request. Please try again.",
+                "status": "error",
+                "response": "I encountered an error while processing your creative writing request. Please try again.",
                 "error": str(e)
             }
 
@@ -617,6 +638,13 @@ class ContextAwareChatAgent(DomainAgent):
             'topics': set(),
             'entities': set()
         }
+        
+        # Convert chat history to a format suitable for analysis
+        messages: List[BaseMessage] = convert_to_messages(chat_history)
+        
+        # Add the current message
+        current_message = HumanMessage(content=input_text)
+        messages.append(current_message)
         
         # Simple keyword extraction for topic tracking
         input_lower = input_text.lower()

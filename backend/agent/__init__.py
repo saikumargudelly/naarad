@@ -4,41 +4,30 @@ This module contains the core agent implementations for the Naarad AI assistant,
 including the base agent, domain-specific agents, and the agent orchestrator.
 """
 
-# Import agent registry first to avoid circular imports
-from .agent_registry import agent_registry, AgentRegistry, AgentInitializationError
+# Import types first to avoid circular imports
+from .types import AgentInitializationError, AgentConfig, BaseAgent
 
-# Import core agent components
-from .agents import (
-    BaseAgent,
-    ResearcherAgent,
-    AnalystAgent,
-    ResponderAgent,
-    QualityAgent
-)
+# Import agent registry (must come after types)
+from .registry import AgentRegistry, agent_registry
 
-# Import domain agents
-from .domain_agents import (
-    DomainAgent,
-    TaskManagementAgent,
-    CreativeWritingAgent,
-    AnalysisAgent,
-    ContextAwareChatAgent,
-    create_domain_agents
-)
-
-# Import orchestrator
-from .orchestrator import AgentOrchestrator
+# Import core agent components (lazy import in functions)
+# Import domain agents (lazy import in functions)
+# Import orchestrator (lazy import in functions)
 
 # Export public API
 __all__ = [
-    # Core agents
+    # Core types
+    'AgentInitializationError',
+    'AgentConfig',
     'BaseAgent',
+    
+    # Core agents (imported lazily)
     'ResearcherAgent',
     'AnalystAgent',
     'ResponderAgent',
     'QualityAgent',
     
-    # Domain agents
+    # Domain agents (imported lazily)
     'DomainAgent',
     'TaskManagementAgent',
     'CreativeWritingAgent',
@@ -46,7 +35,7 @@ __all__ = [
     'ContextAwareChatAgent',
     'create_domain_agents',
     
-    # Orchestrator
+    # Orchestrator (imported lazily)
     'AgentOrchestrator',
     
     # Registry

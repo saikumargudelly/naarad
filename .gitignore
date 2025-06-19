@@ -1,9 +1,7 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
 # Distribution / packaging
@@ -32,23 +30,21 @@ wheels/
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
-htmlcov/
+# Testing and coverage
 .tox/
 .nox/
 .coverage
 .coverage.*
-.cache
+.cache/
 nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+.mypy_cache/
+htmlcov/
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Environments
+# Virtual Environments
 .env
 .venv
 env/
@@ -56,6 +52,23 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+venv_*/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Logs
+logs/
+*.log
+
+# Local development
+local_settings.py
+*.db
+*.sqlite3
+
+# Environment variables (consolidated)
+.env*
+!.env.example
 
 # IDE specific files
 .idea/
@@ -63,11 +76,6 @@ venv.bak/
 *.swp
 *.swo
 *~
-
-# Local development
-*.log
-local_settings.py
-db.sqlite3
 
 # OS generated files
 .DS_Store
@@ -77,3 +85,6 @@ db.sqlite3
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Project specific
+naarad_memory.db

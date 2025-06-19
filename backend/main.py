@@ -1,66 +1,84 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-import os
-from typing import Dict, Any, List
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+import logging
+import time
 
+from config.config import settings
+from config.logging_config import setup_logging
 from routers import chat as chat_router
 
-# Load environment variables
-load_dotenv()
+# Setup logging
+setup_logging("logs/naarad.log")
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Environment: {settings.ENVIRONMENT}")
+    yield
+    # Shutdown
+    logger.info("Shutting down application")
 
 app = FastAPI(
-    title="Naarad AI Assistant",
+    title=settings.APP_NAME,
     description="A curious, cat-like AI companion that assists users via chat",
-    version="0.1.0",
+    version=settings.APP_VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    openapi_url="/openapi.json",
+    lifespan=lifespan
 )
 
-# Include routers
-app.include_router(chat_router.router, prefix="/api", tags=["chat"])
+# Middleware for logging requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    logger.info(f"Request: {request.method} {request.url}")
+    
+    try:
+        response = await call_next(request)
+        process_time = (time.time() - start_time) * 1000
+        response.headers["X-Process-Time"] = str(process_time)
+        logger.info(f"Response: {response.status_code} - {process_time:.2f}ms")
+        return response
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal Server Error"}
+        )
 
-# CORS middleware configuration
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "*").split(","),
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class ChatMessage(BaseModel):
-    content: str
-    images: list[str] = []
-    conversation_id: str = ""
+# Include routers
+app.include_router(chat_router.router, prefix=settings.API_PREFIX, tags=["chat"])
 
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "Naarad AI Assistant is running! 😺",
+        "message": f"{settings.APP_NAME} is running! 😺",
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
         "docs": "/docs",
         "openapi_schema": "/openapi.json"
     }
-
-@app.post("/api/chat")
-async def chat(message: ChatMessage):
-    try:
-        # Process the message with Naarad's agent
-        response = {
-            "message": "I'm Naarad, your cat-like AI assistant! 😺 I'm still learning, but I'm here to help with your questions and tasks.",
-            "sources": []
-        }
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", 8000)),
-        reload=os.getenv("APP_ENV") == "development"
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.ENVIRONMENT == "development",
+        log_level=settings.LOG_LEVEL.lower()
     )

@@ -1,13 +1,24 @@
 """Pytest configuration and fixtures for agent tests."""
+import os
 import sys
 import pytest
 from unittest.mock import MagicMock, Mock, patch
 from pathlib import Path
 
-# Add project root to Python path
+# Add project root and backend to Python path
 project_root = str(Path(__file__).parent.parent)
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+backend_dir = str(Path(__file__).parent.parent)
+
+# Add to Python path if not already there
+for path in [project_root, backend_dir]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+# Set PYTHONPATH environment variable
+os.environ['PYTHONPATH'] = os.pathsep.join([project_root, backend_dir] + sys.path[1:])
+
+print(f"Python path: {sys.path}")
+print(f"Working directory: {os.getcwd()}")
 
 # Mock settings before any imports
 class MockSettings:

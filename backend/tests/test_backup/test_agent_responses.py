@@ -4,12 +4,21 @@ import json
 import unittest
 import asyncio
 import pytest
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from fastapi.testclient import TestClient
 from fastapi import status, FastAPI
+
+# Import our simplified message implementation
+from agent.simple_message_v2 import (
+    AIMessage, 
+    HumanMessage, 
+    SystemMessage, 
+    BaseMessage,
+    convert_to_message
+)
 
 # Add parent directory to path to allow imports from the main module
 project_root = str(Path(__file__).parent.parent)
@@ -76,12 +85,14 @@ class TestAgentResponses(unittest.TestCase):
             }
         ]
     
-    def send_chat_message(self, message: str, conversation_id: Optional[str] = None, 
-                         user_id: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+    def send_chat_message(self, message: Union[str, Dict[str, Any]], 
+                         conversation_id: Optional[str] = None, 
+                         user_id: Optional[str] = None, 
+                         **kwargs) -> Dict[str, Any]:
         """Helper method to send a chat message and return the response.
         
         Args:
-            message: The message text to send
+            message: The message text to send (can be string or message dict)
             conversation_id: Optional conversation ID
             user_id: Optional user ID
             **kwargs: Additional parameters to include in the request
@@ -89,7 +100,9 @@ class TestAgentResponses(unittest.TestCase):
         Returns:
             Dict containing the JSON response
         """
-        payload = {"message": message, **kwargs}
+        # Convert to our message format and then to dict
+        message_obj = convert_to_message(message)
+        payload = {"message": message_obj.model_dump(), **kwargs}
         if conversation_id:
             payload["conversation_id"] = conversation_id
         if user_id:

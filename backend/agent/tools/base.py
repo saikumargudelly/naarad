@@ -1,17 +1,36 @@
 """Base classes for agent tools."""
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Type, TypeVar
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 T = TypeVar('T', bound='BaseTool')
 
 class ToolParameter(BaseModel):
     """Schema for tool parameters."""
-    name: str
-    type: str
-    description: str
-    required: bool = True
-    default: Any = None
+    model_config = ConfigDict(
+        extra='forbid',
+        validate_assignment=True,
+        json_schema_extra={
+            'example': {
+                'name': 'parameter_name',
+                'type': 'string',
+                'description': 'Description of the parameter',
+                'required': True
+            }
+        }
+    )
+    
+    name: str = Field(..., description="The name of the parameter")
+    type: str = Field(..., description="The type of the parameter (e.g., string, integer, boolean)")
+    description: str = Field(..., description="A description of what the parameter is used for")
+    required: bool = Field(
+        default=True,
+        description="Whether the parameter is required"
+    )
+    default: Any = Field(
+        default=None,
+        description="Default value if the parameter is not provided"
+    )
 
 class BaseTool(ABC):
     """Base class for all agent tools.
