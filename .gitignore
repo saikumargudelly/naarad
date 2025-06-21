@@ -3,6 +3,24 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyc
+
+# Frontend
+node_modules/
+!package.json
+!package-lock.json
+
+# Frontend build directories
+/dist
+/build
+.next/
+out/
+
+# Frontend cache
+.nuxt/
+.cache/
+.npm
+.eslintcache
 
 # Distribution / packaging
 .Python

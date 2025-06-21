@@ -5,5 +5,6 @@ This package contains various tools that can be used by the agent to perform spe
 
 from .vision_tool import LLaVAVisionTool
 from .brave_search import BraveSearchTool
+from .dummy_tool import DummyTool
 
-__all__ = ['LLaVAVisionTool', 'BraveSearchTool']
+__all__ = ['LLaVAVisionTool', 'BraveSearchTool', 'DummyTool']

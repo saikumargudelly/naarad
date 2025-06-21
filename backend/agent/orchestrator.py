@@ -1,8 +1,10 @@
-from typing import Dict, Any, List, Optional, Tuple, Type
+from typing import Dict, Any, List, Optional, Tuple, Type, Union, Callable
 from datetime import datetime
 import json
 import logging
 import importlib
+import asyncio
+from functools import wraps
 import time
 import asyncio
 
@@ -81,7 +83,7 @@ class AgentOrchestrator:
                 history_context['has_image'] = True
                 del history_context['image_data']
                 
-            self._update_history(
+            await self._update_history(
                 user_input=user_input,
                 conversation_id=conversation_id,
                 user_id=user_id
@@ -106,7 +108,7 @@ class AgentOrchestrator:
             )
             
             # 3. Update conversation history with the response
-            self._update_history(
+            await self._update_history(
                 user_input=user_input,
                 assistant_response=response['output'],
                 conversation_id=conversation_id,
@@ -153,78 +155,144 @@ class AgentOrchestrator:
         conversation_id: str,
         user_id: str
     ) -> Dict[str, Any]:
-        """Determine which agent(s) should handle the query."""
-        # Get conversation context
-        memory = memory_manager.get_conversation(conversation_id, user_id) or {}
+        """Determine which agent(s) should handle the query.
         
-        # Check for domain-specific intents
-        domain_agent = self._identify_domain(user_input, context, memory)
-        
-        if domain_agent:
+        Args:
+            user_input: The user's input text
+            context: Additional context including any files or metadata
+            conversation_id: ID of the current conversation
+            user_id: ID of the current user
+            
+        Returns:
+            Dict containing the primary agent and any supporting agents
+        """
+        try:
+            # Get conversation context asynchronously
+            memory_coro = memory_manager.get_conversation(conversation_id, user_id)
+            memory = await memory_coro if hasattr(memory_coro, '__await__') else memory_coro or {}
+            
+            # Check for domain-specific intents
+            domain_agent = await self._identify_domain(user_input, context, memory)
+            
+            if domain_agent:
+                return {
+                    'primary_agent': domain_agent,
+                    'supporting_agents': []
+                }
+            
+            # Default to general response agent
             return {
-                'primary_agent': domain_agent,
-                'supporting_agents': ['context_manager']
+                'primary_agent': 'responder',
+                'supporting_agents': []
             }
-        
-        # Default to general response agent
-        return {
-            'primary_agent': 'responder',
-            'supporting_agents': ['context_manager']
-        }
+            
+        except Exception as e:
+            logger.error(f"Error in _select_agent: {str(e)}", exc_info=True)
+            # Fallback to responder agent on error
+            return {
+                'primary_agent': 'responder',
+                'supporting_agents': []
+            }
     
-    def _identify_domain(
+    async def _identify_domain(
         self, 
         user_input: str, 
         context: Dict[str, Any],
-        memory: Dict[str, Any]
+        memory: Any
     ) -> Optional[str]:
         """Identify if the query belongs to a specific domain.
+        
+        This method analyzes the user input and context to determine the most appropriate
+        agent to handle the query. It uses a series of checks to identify different types
+        of queries and route them to the appropriate agent.
         
         Args:
             user_input: The user's input text
             context: Additional context including any attached files or metadata
-            memory: The conversation memory
+            memory: The conversation memory (can be a coroutine or dict)
             
         Returns:
             Name of the domain agent to handle the query, or None for default handling
         """
-        input_lower = user_input.lower()
-        
-        # Check for image in context (handled by responder with vision tool)
-        if context.get('has_image', False) or 'image' in input_lower or 'photo' in input_lower:
-            return 'responder'  # Will use vision tool
+        try:
+            # Handle case where memory might be a coroutine
+            mem = memory
+            if hasattr(memory, '__await__'):
+                mem = await memory
+                
+            input_lower = user_input.lower().strip()
             
-        # Web search queries
-        search_keywords = ['search', 'find', 'look up', 'latest', 'current', 'news', 'update']
-        question_words = ['who', 'what', 'when', 'where', 'why', 'how']
-        
-        # If it's a question that might need current info
-        is_question = any(input_lower.startswith(word) for word in question_words)
-        needs_search = any(keyword in input_lower for keyword in search_keywords)
-        
-        if is_question or needs_search:
-            return 'researcher'  # Will use Brave Search tool
-        
-        # Task management
-        task_keywords = ['task', 'todo', 'remind', 'due', 'deadline']
-        if any(keyword in input_lower for keyword in task_keywords):
-            return 'task_manager'
+            # Check for image-related queries
+            if context.get('has_image') or any(word in input_lower for word in ['image', 'picture', 'photo']):
+                return 'responder'  # Image queries go to responder which can use vision tools
+                
+            # Check for simple greetings and conversational queries
+            greetings = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening']
+            if any(input_lower.startswith(greeting) for greeting in greetings) or len(input_lower.split()) < 3:
+                return 'responder'  # Short, simple queries go to responder
+                
+            # Check for simple math questions (e.g., "what is 2 + 2" or "calculate 5 * 3")
+            math_phrases = ['what is', 'what\'s', 'calculate', 'compute', 'solve', 'how much is', 'add', 'subtract', 'multiply', 'divide']
+            math_operators = ['+', '-', '*', '/', 'plus', 'minus', 'times', 'divided by', 'x', '×', '÷']
             
-        # Creative writing
-        writing_keywords = ['write', 'story', 'poem', 'creative', 'compose']
-        if any(keyword in input_lower for keyword in writing_keywords):
-            return 'creative_writer'
+            if any(phrase in input_lower for phrase in math_phrases) and \
+               any(op in input_lower for op in math_operators):
+                return 'responder'  # Simple math questions go to responder
+                
+            # Check for general knowledge questions that don't need web search
+            general_knowledge = ['who is', 'what is', 'when was', 'where is', 'how to', 'why is', 'what are']
+            if any(input_lower.startswith(phrase) for phrase in general_knowledge) and \
+               not any(word in input_lower for word in ['recent', 'latest', 'current', 'today', 'yesterday']):
+                return 'responder'  # General knowledge questions that don't need current info
+                
+            # Check for research or web search needed
+            research_keywords = [
+                'research', 'find', 'look up', 'search for', 'latest', 
+                'current', 'recent', 'news', 'update', 'score', 'live', 
+                'vs', 'cricket', 'weather', 'temperature'
+            ]
+            if any(keyword in input_lower for keyword in research_keywords):
+                return 'researcher'
+
+            # Check for analysis or comparison queries
+            analysis_keywords = ['analyze', 'compare', 'analysis', 'breakdown', 'pros and cons']
+            if any(keyword in input_lower for keyword in analysis_keywords):
+                return 'analyst'
+                
+            # Check for image in context (handled by responder with vision tool)
+            if context.get('has_image', False) or 'image' in input_lower or 'photo' in input_lower:
+                return 'responder'  # Will use vision tool
+                
+            # Web search queries
+            search_keywords = ['search', 'find', 'look up', 'latest', 'current', 'news', 'update']
+            question_words = ['who', 'what', 'when', 'where', 'why', 'how']
             
-        # Analysis - complex queries that need reasoning
-        analysis_keywords = ['analyze', 'research', 'compare', 'explain in detail', 'pros and cons']
-        if any(keyword in input_lower for keyword in analysis_keywords):
-            return 'analyst'
+            # If it's a question that might need current info
+            is_question = any(input_lower.startswith(word) for word in question_words)
+            needs_search = any(keyword in input_lower for keyword in search_keywords)
             
-        # Check conversation context from memory
-        if 'metadata' in memory and 'active_domain' in memory['metadata']:
-            return memory['metadata']['active_domain']
+            if is_question or needs_search:
+                return 'researcher'  # Will use Brave Search tool
             
-        return None
+            # Task management
+            task_keywords = ['task', 'todo', 'remind', 'due', 'deadline']
+            if any(keyword in input_lower for keyword in task_keywords):
+                return 'task_manager'
+                
+            # Creative writing
+            writing_keywords = ['write', 'story', 'poem', 'creative', 'compose']
+            if any(keyword in input_lower for keyword in writing_keywords):
+                return 'creative_writer'
+            
+            # Check conversation context from memory if it's available
+            if mem and 'metadata' in mem and 'active_domain' in mem['metadata']:
+                return mem['metadata']['active_domain']
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in _identify_domain: {str(e)}", exc_info=True)
+            return None  # Return None to use default routing
     
     async def _route_to_agent(
         self,
@@ -453,7 +521,7 @@ class AgentOrchestrator:
                 return await self._handle_image_analysis(user_input, context, conversation_id, user_id)
             
             # Prepare the input with conversation history
-            history = self._get_formatted_history(conversation_id, user_id)
+            history = await self._get_formatted_history(conversation_id, user_id)
             
             # Prepare context for the agent
             process_kwargs = {
@@ -477,24 +545,46 @@ class AgentOrchestrator:
             # Set a timeout for agent processing
             try:
                 # Process with the agent
-                response = await asyncio.wait_for(
-                    agent.process(**process_kwargs),
-                    timeout=60  # 60 second timeout
-                )
+                agent_response = agent.process(**process_kwargs)
+                
+                # Ensure we await the coroutine if it is one
+                if hasattr(agent_response, '__await__'):
+                    response = await asyncio.wait_for(
+                        agent_response,
+                        timeout=60  # 60 second timeout
+                    )
+                else:
+                    response = agent_response
                 
                 # Log the response
                 processing_time = time.time() - start_time
                 logger.info(f"[Orchestrator] {agent_name} agent completed in {processing_time:.2f}s")
                 
+                # Ensure response is a dictionary
+                if not isinstance(response, dict):
+                    response = {
+                        'output': str(response) if response is not None else 'No response from agent',
+                        'metadata': {}
+                    }
+                
                 # Add processing metadata
-                if isinstance(response, dict):
-                    if 'metadata' not in response:
-                        response['metadata'] = {}
-                    response['metadata'].update({
-                        'processing_time_seconds': processing_time,
-                        'agent_used': agent_name,
-                        'model': getattr(agent, 'model_name', 'unknown')
-                    })
+                if 'metadata' not in response:
+                    response['metadata'] = {}
+                    
+                # Ensure metadata values are JSON serializable
+                metadata = {
+                    'processing_time_seconds': float(processing_time),
+                    'agent_used': agent_name,
+                    'model': str(getattr(agent, 'model_name', 'unknown')),
+                    'success': response.get('success', True)
+                }
+                response['metadata'].update(metadata)
+                
+                # Ensure output is a string
+                if 'output' in response and not isinstance(response['output'], str):
+                    if hasattr(response['output'], '__await__'):
+                        response['output'] = await response['output']
+                    response['output'] = str(response['output'])
                 
                 return response
                 
@@ -558,7 +648,7 @@ class AgentOrchestrator:
             # Process with the vision tool
             vision_response = await responder.process(
                 input_text=json.dumps(vision_input),
-                chat_history=self._get_formatted_history(conversation_id, user_id)
+                chat_history=await self._get_formatted_history(conversation_id, user_id)
             )
             
             if not vision_response.get('success', False):
@@ -581,7 +671,7 @@ class AgentOrchestrator:
                 'error': str(e)
             }
 
-    def _update_history(
+    async def _update_history(
         self,
         user_input: str,
         assistant_response: str = None,
@@ -589,49 +679,173 @@ class AgentOrchestrator:
         user_id: str = "default"
     ) -> None:
         """Update the conversation history in memory."""
-        memory = memory_manager.get_conversation(conversation_id, user_id) or {}
-        messages = memory.get('messages', [])
-        
-        # Add user message
-        messages.append({
-            'role': 'user',
-            'content': user_input,
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        # Add assistant response if provided
-        if assistant_response is not None:
+        try:
+            # Get the current conversation state
+            memory = await memory_manager.get_conversation(conversation_id, user_id) or {}
+            messages = memory.get('messages', [])
+            
+            # Add user message
             messages.append({
-                'role': 'assistant',
-                'content': assistant_response,
+                'role': 'user',
+                'content': user_input,
                 'timestamp': datetime.utcnow().isoformat()
             })
-        
-        # Update memory
-        memory_manager.save_conversation(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            messages=messages,
-            metadata=memory.get('metadata', {})
-        )
+            
+            # Add assistant response if provided
+            if assistant_response is not None:
+                # Ensure the response is a string, not a coroutine or other non-serializable type
+                if hasattr(assistant_response, '__await__'):
+                    assistant_response = await assistant_response
+                
+                # If it's a dict, extract the output
+                if isinstance(assistant_response, dict) and 'output' in assistant_response:
+                    assistant_response = assistant_response['output']
+                
+                # Convert to string if needed
+                if not isinstance(assistant_response, str):
+                    assistant_response = str(assistant_response)
+                
+                messages.append({
+                    'role': 'assistant',
+                    'content': assistant_response,
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+            
+            # Ensure messages are JSON serializable
+            def make_serializable(obj):
+                if isinstance(obj, (str, int, float, bool, type(None))):
+                    return obj
+                elif isinstance(obj, dict):
+                    return {k: make_serializable(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [make_serializable(item) for item in obj]
+                else:
+                    return str(obj)
+            
+            serialized_messages = make_serializable(messages)
+            
+            # Update memory
+            await memory_manager.save_conversation(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                messages=serialized_messages,
+                metadata=memory.get('metadata', {})
+            )
+        except Exception as e:
+            logger.error(f"Error updating conversation history: {str(e)}", exc_info=True)
+            # Don't raise the error to avoid breaking the main flow
+            pass
     
-    def _get_formatted_history(
+    async def _get_formatted_history(
         self,
         conversation_id: str,
         user_id: str,
         max_messages: int = 10
-    ) -> List[Dict[str, str]]:
-        """Get formatted conversation history for agent input."""
-        memory = memory_manager.get_conversation(conversation_id, user_id) or {}
-        messages = memory.get('messages', [])
+    ) -> str:
+        """Get formatted conversation history for agent input.
         
-        # Return last N messages, keeping the most recent
-        recent_messages = messages[-max_messages:]
-        
-        return [
-            {
-                'role': msg['role'],
-                'content': msg['content']
+        Args:
+            conversation_id: ID of the conversation
+            user_id: ID of the user
+            max_messages: Maximum number of messages to return
+            
+        Returns:
+            Formatted conversation history as a string
+        """
+        try:
+            # Get conversation history from memory
+            memory = await memory_manager.get_conversation(conversation_id, user_id) or {}
+            messages = memory.get('messages', [])
+            
+            def safe_get(obj, key, default=''):
+                """Safely get a value from a dictionary, converting to string if needed."""
+                value = obj.get(key, default)
+                if value is None:
+                    return ''
+                return str(value)
+            
+            # Format messages as a string, ensuring all values are strings
+            formatted = []
+            for msg in messages[-max_messages:]:  # Only get the most recent messages
+                try:
+                    if not isinstance(msg, dict):
+                        continue
+                    
+                    role = safe_get(msg, 'role', 'unknown')
+                    content = safe_get(msg, 'content', '')
+                    
+                    # Ensure content is a string and not too long
+                    if not isinstance(content, str):
+                        content = str(content)
+                    
+                    # Truncate very long messages to prevent context overflow
+                    if len(content) > 1000:
+                        content = content[:995] + '...'
+                    
+                    formatted.append(f"{role}: {content}")
+                except Exception as msg_err:
+                    logger.warning(f"Error formatting message: {msg_err}", exc_info=True)
+                    continue
+            
+            return "\n".join(formatted) if formatted else "No conversation history available."
+            
+        except Exception as e:
+            logger.error(f"Error getting conversation history: {str(e)}", exc_info=True)
+            return "Error: Could not load conversation history."
+    
+    async def _handle_image_analysis(
+        self,
+        user_input: str,
+        context: Dict[str, Any],
+        conversation_id: str,
+        user_id: str
+    ) -> Dict[str, Any]:
+        """Handle image analysis using the vision tool."""
+        try:
+            # Get the responder agent which has the vision tool
+            responder = self.base_agents['responder']
+            
+            # Prepare the input for the vision tool
+            image_url = context.get('image_url')
+            if not image_url and 'image_data' in context:
+                # If we have raw image data, we'd need to upload it somewhere first
+                # For now, we'll just use a placeholder
+                return {
+                    'success': False,
+                    'output': "Image upload from data is not yet supported. Please provide a URL.",
+                    'error': 'image_upload_not_supported'
+                }
+                
+            # Create the input for the vision tool
+            vision_input = {
+                'image_url': image_url,
+                'prompt': user_input or "What is in this image?"
             }
-            for msg in recent_messages
-        ]
+            
+            # Process with the vision tool
+            vision_response = await responder.process(
+                input_text=json.dumps(vision_input),
+                chat_history=await self._get_formatted_history(conversation_id, user_id)
+            )
+            
+            if not vision_response.get('success', False):
+                raise Exception(vision_response.get('error', 'Unknown error in vision tool'))
+                
+            return {
+                'success': True,
+                'output': vision_response.get('output', 'No description available'),
+                'metadata': {
+                    'tool_used': 'vision',
+                    'image_url': image_url
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in image analysis: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'output': "I couldn't analyze the image. Please try again with a different image or description.",
+                'error': str(e)
+            }
+
+# ... (rest of the code remains the same)

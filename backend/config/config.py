@@ -1,9 +1,20 @@
+"""Main application configuration.
+
+This module combines all domain-specific configurations into a single settings object.
+"""
+
 from enum import Enum
 from typing import List, Optional, Dict, Any, Union, Literal
 from pathlib import Path
 from pydantic import Field, field_validator, model_validator, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic.networks import AnyHttpUrl, HttpUrl
+
+# Import domain-specific configurations
+from .database_config import DatabaseSettings
+from .llm_config import LLMSettings
+from .security_config import SecuritySettings
+from .logging_config import LoggingSettings, LogLevel
 
 class Environment(str, Enum):
     """Application environment types."""
@@ -12,16 +23,8 @@ class Environment(str, Enum):
     PRODUCTION = "production"
     TESTING = "testing"
 
-class LogLevel(str, Enum):
-    """Logging levels."""
-    DEBUG = "DEBUG"
-    INFO = "INFO"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
-    CRITICAL = "CRITICAL"
-
 class Settings(BaseSettings):
-    """Application settings."""
+    """Main application settings combining all domain configurations."""
     
     # Model configuration
     model_config = SettingsConfigDict(
@@ -31,7 +34,6 @@ class Settings(BaseSettings):
         extra='ignore',
         env_nested_delimiter='__',
         validate_default=True,
-        # Removed NAARAD_ prefix for simpler environment variable names
     )
     
     # --- Application Settings ---
@@ -39,11 +41,6 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     ENVIRONMENT: Environment = Environment.DEVELOPMENT
     DEBUG: bool = True
-    SECRET_KEY: str = Field(
-        default="your-secret-key-here",
-        min_length=32,
-        description="Secret key for cryptographic operations"
-    )
     
     # --- Server Settings ---
     HOST: str = "0.0.0.0"
@@ -51,71 +48,9 @@ class Settings(BaseSettings):
     RELOAD: bool = True
     WORKERS: int = 1
     
-    # CORS Settings
-    BACKEND_CORS_ORIGINS: List[Union[HttpUrl, str]] = [
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:8000",
-    ]
-    
-    @field_validator("BACKEND_CORS_ORIGINS")
-    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        """Parse CORS origins from string or list."""
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
-    
     # API Settings
     API_PREFIX: str = "/api"
     API_V1_STR: str = "/api/v1"
-    
-    # --- Logging ---
-    LOG_LEVEL: LogLevel = LogLevel.INFO
-    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    
-    # --- Rate Limiting ---
-    RATE_LIMIT: str = "100/minute"
-    RATE_LIMIT_WINDOW: int = 60  # seconds
-    
-    # --- Security ---
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
-    ALGORITHM: str = "HS256"
-    
-    # --- API Keys ---
-    OPENROUTER_API_KEY: Optional[str] = Field(
-        default=None,
-        description="API key for OpenRouter service"
-    )
-    TOGETHER_API_KEY: Optional[str] = Field(
-        default=None,
-        description="API key for Together AI service"
-    )
-    BRAVE_API_KEY: Optional[str] = Field(
-        default=None,
-        description="API key for Brave Search"
-    )
-    GROQ_API_KEY: Optional[str] = Field(
-        default=None,
-        description="API key for Groq service"
-    )
-    
-    # --- Database ---
-    DATABASE_URL: Optional[str] = Field(
-        default=None,
-        description="Database connection string"
-    )
-    
-    # --- Supabase Configuration ---
-    SUPABASE_URL: Optional[HttpUrl] = None
-    SUPABASE_KEY: Optional[str] = None
-    
-    # --- Model Configuration ---
-    DEFAULT_MODEL: str = "mistralai/Mixtral-8x7B-Instruct-v0.1"
-    CHAT_MODEL: str = "nousresearch/nous-hermes-2-mixtral-8x7b-dpo"
-    EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
     
     # --- File Storage ---
     UPLOAD_FOLDER: Path = Path("uploads")
@@ -130,6 +65,18 @@ class Settings(BaseSettings):
     ENABLE_METRICS: bool = True
     METRICS_PORT: int = 9100
     
+    # --- External API Keys ---
+    BRAVE_API_KEY: Optional[str] = Field(
+        default=None,
+        description="API key for Brave Search"
+    )
+    
+    # --- Domain-specific settings ---
+    database: DatabaseSettings = DatabaseSettings()
+    llm: LLMSettings = LLMSettings()
+    security: SecuritySettings = SecuritySettings()
+    logging: LoggingSettings = LoggingSettings()
+    
     # --- Validation ---
     @field_validator('ENVIRONMENT')
     def validate_environment(cls, v: str) -> str:
@@ -143,7 +90,44 @@ class Settings(BaseSettings):
         """Validate settings after model initialization."""
         if self.ENVIRONMENT == Environment.PRODUCTION and self.DEBUG:
             self.DEBUG = False
-            self.LOG_LEVEL = LogLevel.INFO
+            self.logging.LOG_LEVEL = LogLevel.INFO
         return self
+    
+    # --- Convenience properties ---
+    @property
+    def is_development(self) -> bool:
+        """Check if running in development mode."""
+        return self.ENVIRONMENT == Environment.DEVELOPMENT
+    
+    @property
+    def is_production(self) -> bool:
+        """Check if running in production mode."""
+        return self.ENVIRONMENT == Environment.PRODUCTION
+    
+    @property
+    def is_testing(self) -> bool:
+        """Check if running in testing mode."""
+        return self.ENVIRONMENT == Environment.TESTING
+    
+    @property
+    def cors_origins(self) -> List[str]:
+        """Get CORS origins from security settings."""
+        return self.security.BACKEND_CORS_ORIGINS
+    
+    @property
+    def rate_limit(self) -> str:
+        """Get rate limit from security settings."""
+        return self.security.RATE_LIMIT
+    
+    @property
+    def log_level(self) -> str:
+        """Get log level from logging settings."""
+        return self.logging.LOG_LEVEL
+    
+    @property
+    def log_format(self) -> str:
+        """Get log format from logging settings."""
+        return self.logging.LOG_FORMAT
 
+# Create global settings instance
 settings = Settings()

@@ -15,49 +15,39 @@ class Settings(BaseSettings):
     """LLM and API configuration settings."""
     
     # --- Model Configuration ---
-    # Model names and configurations for OpenRouter
+    # Default provider
+    LLM_PROVIDER: str = Field(
+        default="groq",
+        description="Default LLM provider (groq, openai, etc.)"
+    )
+    
+    # Model names and configurations - Updated to use currently supported models
     REASONING_MODEL: str = Field(
-        default="openai/gpt-4",
+        default="llama3-8b-8192",
         description="Default model for reasoning tasks"
     )
     CHAT_MODEL: str = Field(
-        default="openai/gpt-3.5-turbo-0125",
+        default="llama3-8b-8192",
         description="Model optimized for chat interactions"
     )
     VISION_MODEL: str = Field(
-        default="openai/gpt-4-vision-preview",
+        default="llava-1.5-7b",
         description="Model for vision-language tasks"
     )
     EMBEDDING_MODEL: str = Field(
-        default="text-embedding-ada-002",
+        default="text-embedding-3-small",
         description="Model for text embeddings"
     )
     
     # --- API Configuration ---
-    # OpenRouter
-    OPENROUTER_API_KEY: Optional[str] = Field(
-        default=None,
-        description="API key for OpenRouter service"
-    )
-    OPENROUTER_BASE_URL: str = Field(
-        default="https://openrouter.ai/api/v1",
-        description="Base URL for OpenRouter API"
-    )
-    
-    # Together.ai
-    TOGETHER_API_KEY: Optional[str] = Field(
-        default=None,
-        description="API key for Together AI service"
-    )
-    TOGETHER_BASE_URL: str = Field(
-        default="https://api.together.xyz/v1",
-        description="Base URL for Together AI API"
-    )
-    
-    # Groq
+    # Groq Configuration
     GROQ_API_KEY: Optional[str] = Field(
         default=None,
         description="API key for Groq service"
+    )
+    GROQ_BASE_URL: str = Field(
+        default="https://api.groq.com/openai/v1",
+        description="Base URL for Groq API"
     )
     
     # Brave Search
@@ -96,21 +86,21 @@ class Settings(BaseSettings):
         description="Supabase anon/public key"
     )
     
-    # --- Model Configuration ---
+    # --- Generation Parameters ---
     MAX_TOKENS: int = Field(
-        default=4096,
+        default=8192,  # Increased for Groq's larger context windows
         ge=1,
         le=32768,
         description="Maximum number of tokens to generate"
     )
     TEMPERATURE: float = Field(
-        default=0.7,
+        default=0.2,  # Lower temperature for more focused responses
         ge=0.0,
-        le=2.0,
+        le=1.0,
         description="Sampling temperature for generation"
     )
     TOP_P: float = Field(
-        default=0.9,
+        default=0.95,  # Slightly higher top_p for better diversity
         ge=0.0,
         le=1.0,
         description="Nucleus sampling parameter"
@@ -149,8 +139,7 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra='ignore',
         env_nested_delimiter='__',
-        validate_default=True,
-        env_prefix='NAARAD_LLM_',
+        validate_default=True
     )
 
 settings = Settings()

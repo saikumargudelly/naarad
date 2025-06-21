@@ -1,72 +1,78 @@
 #!/bin/bash
 
-# Update pip
+# Update dependencies script for Naarad AI Backend
+# This script updates all dependencies to their latest compatible versions
+
+set -e
+
+echo "🚀 Updating Naarad AI Backend dependencies..."
+
+# Check if virtual environment exists
+if [ ! -d "venv" ]; then
+    echo "📦 Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+# Activate virtual environment
+echo "🔧 Activating virtual environment..."
+source venv/bin/activate
+
+# Upgrade pip
+echo "⬆️  Upgrading pip..."
 pip install --upgrade pip
 
-# Install core dependencies
-pip install --upgrade \
-    fastapi \
-    uvicorn[standard] \
-    python-multipart \
-    python-dotenv \
-    pydantic \
-    pydantic-settings \
-    pydantic-core \
-    pydantic-extra-types \
-    email-validator
+# Install/upgrade core dependencies
+echo "📦 Installing core dependencies..."
+pip install -r requirements.txt --upgrade
 
-# Install AI/ML dependencies
-pip install --upgrade \
-    numpy \
-    pandas \
-    scipy \
-    scikit-learn \
-    tiktoken \
-    tqdm
+# Install development dependencies (optional)
+if [ "$1" = "--dev" ]; then
+    echo "🔧 Installing development dependencies..."
+    pip install -r requirements-dev.txt --upgrade
+fi
 
-# Install LangChain stack
-pip install --upgrade \
-    langchain \
-    langchain-community \
-    langchain-core \
-    langchain-openai \
-    langchain-text-splitters
+# Verify installations
+echo "✅ Verifying installations..."
+python -c "
+import sys
+print(f'Python version: {sys.version}')
 
-# Install database dependencies
-pip install --upgrade \
-    SQLAlchemy \
-    alembic \
-    psycopg2-binary
+try:
+    import fastapi
+    print(f'FastAPI version: {fastapi.__version__}')
+except ImportError:
+    print('FastAPI: Not installed')
 
-# Install HTTP/API dependencies
-pip install --upgrade \
-    httpx \
-    requests \
-    aiohttp \
-    python-jose[cryptography] \
-    yarl \
-    websockets
+try:
+    import langchain
+    print(f'LangChain version: {langchain.__version__}')
+except ImportError:
+    print('LangChain: Not installed')
 
-# Install utility dependencies
-pip install --upgrade \
-    anyio \
-    slowapi \
-    PyYAML \
-    regex \
-    rsa \
-    shellingham \
-    sniffio \
-    starlette \
-    tenacity \
-    typer \
-    typing-extensions \
-    ujson \
-    urllib3 \
-    uvloop \
-    watchfiles \
-    orjson
+try:
+    import pydantic
+    print(f'Pydantic version: {pydantic.__version__}')
+except ImportError:
+    print('Pydantic: Not installed')
 
-# Install monitoring dependencies
-pip install --upgrade prometheus-client
+try:
+    import slowapi
+    print(f'SlowAPI version: {slowapi.__version__}')
+except ImportError:
+    print('SlowAPI: Not installed')
 
-echo "All dependencies have been updated successfully!"
+try:
+    import uvicorn
+    print(f'Uvicorn version: {uvicorn.__version__}')
+except ImportError:
+    print('Uvicorn: Not installed')
+"
+
+echo "🎉 Dependencies updated successfully!"
+echo ""
+echo "To start the server:"
+echo "  source venv/bin/activate"
+echo "  python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000"
+echo ""
+echo "To run tests:"
+echo "  pytest tests/"

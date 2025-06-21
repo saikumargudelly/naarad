@@ -150,6 +150,7 @@ class DomainAgent:
                 tools=self.tools,
                 verbose=settings.debug_mode,
                 handle_parsing_errors=True,
+                model_name="mixtral-8x7b-instruct-v0.1",
                 max_iterations=5,
                 early_stopping_method="generate",
                 max_execution_time=30,  # seconds

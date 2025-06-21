@@ -1,0 +1,1053 @@
+from typing import Dict, Any, List, Optional, Type, TypeVar, Union, Sequence, Tuple, Literal
+from typing_extensions import TypedDict
+from langchain_core.tools import BaseTool
+from dataclasses import dataclass, field
+import logging
+import os
+import json
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# LangChain imports
+from langchain.agents import AgentExecutor as LangChainAgentExecutor
+from langchain.agents import AgentType
+from langchain_core.tools import Tool
+from langchain.agents.output_parsers import ReActSingleInputOutputParser
+from langchain.agents.mrkl.base import ZeroShotAgent
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from langchain.chains import LLMChain
+from langchain_core.language_models import BaseChatModel, BaseLanguageModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    FunctionMessage,
+    ToolMessage
+)
+from langchain.schema import AgentAction, AgentFinish
+from langchain_core.prompts import (
+    ChatPromptTemplate,
+    HumanMessagePromptTemplate,
+    SystemMessagePromptTemplate,
+    MessagesPlaceholder,
+)
+from langchain_core.runnables import RunnablePassthrough
+from langchain.agents import AgentExecutor
+from pydantic import BaseModel, Field, ConfigDict
+
+# Groq import
+from groq import Groq
+
+# Local imports
+from llm.config import settings
+
+# Type hints
+AgentExecutor = TypeVar('AgentExecutor', bound=LangChainAgentExecutor)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def create_react_agent(
+    llm: BaseLanguageModel,
+    tools: Sequence[BaseTool],
+    prompt: ChatPromptTemplate
+) -> AgentExecutor:
+    """Create a ReAct agent with the given LLM and tools.
+    
+    Args:
+        llm: The language model to use
+        tools: List of tools the agent can use
+        prompt: The prompt template to use
+        
+    Returns:
+        An AgentExecutor instance
+    """
+    # Format the tools for the prompt
+    tool_names = [tool.name for tool in tools]
+    tool_descriptions = "\n".join([f"- {tool.name}: {tool.description}" for tool in tools])
+    
+    # Create the agent
+    agent = (
+        {
+            "input": lambda x: x["input"],
+            "agent_scratchpad": lambda x: format_log_to_str(x["intermediate_steps"]),
+            "tool_names": lambda x: ", ".join(tool_names),
+            "tool_descriptions": lambda x: tool_descriptions,
+        }
+        | prompt
+        | llm
+        | ReActSingleInputOutputParser()
+    )
+    
+    return AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+from llm.config import settings
+
+# Configure logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Load environment variables
+load_dotenv()
+
+# Type variable for agent classes
+AgentT = TypeVar('AgentT', bound='BaseAgent')
+
+class AgentConfig(BaseModel):
+    """Configuration for an agent.
+    
+    Models are configured to use Groq with the following mapping:
+    - Language Reasoning: mixtral-8x7b-32768
+    - Chat: mixtral-8x7b-32768
+    - Default: mixtral-8x7b-32768
+    """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    name: str
+    description: str
+    model_name: str = "mixtral-8x7b-32768"
+    temperature: float = 0.7
+    system_prompt: str = ""
+    tools: List[Any] = Field(default_factory=list)
+    max_iterations: int = 10
+    verbose: bool = True
+    
+    def model_post_init(self, __context):
+        """Post-init processing for Pydantic v2 compatibility."""
+        pass
+
+class BaseAgent:
+    """Base class for all agents.
+    
+    This class provides a base implementation for all agents in the system.
+    It handles the creation and management of the underlying LangChain agent.
+    """
+    
+    def __init__(self, config: AgentConfig):
+        """Initialize the agent with configuration.
+        
+        Args:
+            config: The configuration for the agent.
+        """
+        if not isinstance(config, AgentConfig):
+            config = AgentConfig(**config) if isinstance(config, dict) else AgentConfig.model_validate(config)
+            
+        self.config = config
+        self.agent = self._create_agent()
+        logger.info(f"Initialized {self.__class__.__name__} with model: {config.model_name}")
+    
+    @property
+    def name(self) -> str:
+        """Get the agent's name.
+        
+        Returns:
+            str: The name of the agent.
+        """
+        return self.config.name
+        
+    @property
+    def description(self) -> str:
+        """Get the agent's description.
+        
+        Returns:
+            str: A description of what the agent does.
+        """
+        return self.config.description
+    
+    def _create_agent(self) -> 'AgentExecutor':
+        """Create and return a configured agent with proper tool handling.
+        
+        This method initializes a Groq LLM, sets up the agent with the appropriate
+        tools and prompt template, and returns an AgentExecutor instance.
+        
+        Returns:
+            AgentExecutor: An initialized agent executor ready to process queries.
+            
+        Raises:
+            ValueError: If required environment variables are not set.
+            Exception: For any errors during agent creation.
+        """
+        from langchain.agents import AgentExecutor
+        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.runnables import RunnablePassthrough
+        from groq import Groq
+        import os
+        import logging
+        from typing import List, Dict, Any, Optional, Type
+
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Get API key from environment
+            groq_api_key = os.getenv('GROQ_API_KEY')
+            if not groq_api_key:
+                raise ValueError("GROQ_API_KEY environment variable not set")
+            
+            # Initialize Groq client
+            groq_client = Groq(api_key=groq_api_key)
+            
+            # Create a LangChain compatible LLM class for Groq
+            from langchain_core.runnables import Runnable
+            
+            class GroqLLM(Runnable):
+                """Wrapper class to make Groq API compatible with LangChain."""
+                
+                def __init__(self, model_name: str = "mixtral-8x7b-32768", temperature: float = 0.7):
+                    self.model_name = model_name
+                    self.temperature = temperature
+                    
+                def invoke(self, messages: List[Dict[str, str]], **kwargs) -> str:
+                    """Invoke the Groq API with the given messages."""
+                    try:
+                        response = groq_client.chat.completions.create(
+                            model=self.model_name,
+                            messages=messages,
+                            temperature=self.temperature,
+                            **kwargs
+                        )
+                        return response.choices[0].message.content
+                    except Exception as e:
+                        logger.error(f"Error calling Groq API: {str(e)}")
+                        raise
+                        
+                def stream(self, *args, **kwargs):
+                    """Streaming is not currently implemented for GroqLLM."""
+                    raise NotImplementedError("Streaming not implemented for GroqLLM")
+                    
+                def get_num_tokens(self, text: str) -> int:
+                    """Estimate the number of tokens in the given text."""
+                    # Rough estimate: 1 token ~= 4 characters in English
+                    return len(text) // 4
+                    
+                def with_types(self, *args, **kwargs):
+                    """Required for LangChain compatibility."""
+                    return self
+                
+                def __init__(
+                    self, 
+                    client: Groq, 
+                    model_name: str = "mixtral-8x7b-32768", 
+                    temperature: float = 0.7, 
+                    max_tokens: int = 8192
+                ):
+                    """Initialize the Groq LLM wrapper.
+                    
+                    Args:
+                        client: The Groq client instance
+                        model_name: The Groq model to use
+                        temperature: Sampling temperature
+                        max_tokens: Maximum number of tokens to generate
+                    """
+                    self.client = client
+                    self.model_name = model_name
+                    self.temperature = temperature
+                    self.max_tokens = max_tokens
+                
+                def invoke(self, messages: List[Dict[str, str]], **kwargs) -> str:
+                    """Invoke the Groq API with the given messages.
+                    
+                    Args:
+                        messages: List of message dictionaries with 'role' and 'content'.
+                        **kwargs: Additional arguments to pass to the API call.
+                        
+                    Returns:
+                        str: The generated response content.
+                    
+                    Raises:
+                        Exception: If the API call fails.
+                    """
+                    try:
+                        # Convert LangChain messages to Groq format
+                        groq_messages = []
+                        for msg in messages:
+                            if hasattr(msg, 'type'):
+                                role = "user" if msg.type == "human" else "assistant"
+                                content = msg.content
+                            else:
+                                # Handle case where message is a dict
+                                role = msg.get("role", "user")
+                                content = msg.get("content", "")
+                            groq_messages.append({"role": role, "content": content})
+                        
+                        # Make the API call
+                        response = self.client.chat.completions.create(
+                            messages=groq_messages,
+                            model=self.model_name,
+                            temperature=kwargs.get("temperature", self.temperature),
+                            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                        )
+                        
+                        # Return the content of the response
+                        return response.choices[0].message.content
+                        
+                    except Exception as e:
+                        logger.error(f"Error calling Groq API: {str(e)}")
+                        raise
+                
+                def stream(self, *args, **kwargs):
+                    """Streaming is not currently implemented for GroqLLM."""
+                    raise NotImplementedError("Streaming not implemented for GroqLLM")
+                
+                def get_num_tokens(self, text: str) -> int:
+                    """Estimate the number of tokens in the given text.
+                    
+                    Args:
+                        text: The text to estimate tokens for.
+                        
+                    Returns:
+                        int: Estimated number of tokens.
+                    """
+                    # Simple token estimation (4 chars per token as a rough estimate)
+                    return max(len(text) // 4, 1)
+                
+                def with_types(self, *args, **kwargs):
+                    """Required for LangChain compatibility."""
+                    return self
+            
+            # Initialize the LLM
+            llm = GroqLLM(
+                client=groq_client,
+                model_name=self.config.model_name,
+                temperature=self.config.temperature,
+                max_tokens=8192
+            )
+            
+            # Create the prompt template
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", self.config.system_prompt or "You are a helpful AI assistant."),
+                MessagesPlaceholder("chat_history", optional=True),
+                ("human", "{input}"),
+                MessagesPlaceholder("agent_scratchpad"),
+            ])
+            
+            # Create the agent using ZeroShotAgent
+            agent = ZeroShotAgent.from_llm_and_tools(
+                llm=llm,
+                tools=self.config.tools,
+                prompt=prompt
+            )
+            
+            # Create and return the agent executor
+            executor = AgentExecutor(
+                agent=agent,
+                tools=self.config.tools,
+                verbose=self.config.verbose,
+                max_iterations=self.config.max_iterations,
+                handle_parsing_errors=True,
+                return_intermediate_steps=True,
+                early_stopping_method="generate"
+            )
+            
+            return executor
+            
+        except Exception as e:
+            error_msg = f"Error creating {self.name} agent: {str(e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            raise RuntimeError(error_msg) from e
+    
+    def _format_scratchpad(self, intermediate_steps):
+        """Format the agent's scratchpad for the prompt."""
+        thoughts = ""
+        for action, observation in intermediate_steps:
+            thoughts += f"{action.log}\nObservation: {observation}\n"
+        return thoughts
+
+    async def process(self, input_text: str, **kwargs) -> Dict[str, Any]:
+        """Process input using the agent with enhanced error handling and logging.
+        
+        Args:
+            input_text: The input text to process
+            **kwargs: Additional arguments including:
+                - chat_history: List of previous messages in the conversation
+                - intermediate_steps: List of (action, observation) tuples
+                - conversation_id: ID of the current conversation
+                - user_id: ID of the current user
+                
+        Returns:
+            Dict containing the response and metadata
+        """
+        start_time = time.time()
+        logger.info(f"[{self.name}] Processing input: {input_text[:100]}...")
+        
+        try:
+            # Clean up and validate input
+            if not input_text or not isinstance(input_text, str):
+                raise ValueError("Input text must be a non-empty string")
+                
+            # Log the full input and kwargs for debugging
+            logger.debug(f"[{self.name}] Full input: {input_text}")
+            logger.debug(f"[{self.name}] Additional kwargs: {json.dumps({k: str(v)[:200] for k, v in kwargs.items()}, indent=2)}")
+            
+            # Prepare the input for the agent
+            invoke_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k not in ['headers', 'model_kwargs', 'callbacks']
+            }
+            
+            # Add conversation history if available
+            if 'chat_history' in invoke_kwargs and not invoke_kwargs['chat_history']:
+                del invoke_kwargs['chat_history']
+            
+            # Log tools available to the agent
+            tool_names = [t.name for t in self.config.tools] if hasattr(self.config, 'tools') and self.config.tools else []
+            logger.info(f"[{self.name}] Available tools: {tool_names}")
+            
+            # Process with the agent
+            try:
+                logger.info(f"[{self.name}] Invoking agent with input: {input_text[:200]}...")
+                
+                # Add a timeout to prevent hanging
+                timeout_seconds = 60  # 1 minute timeout
+                
+                async def run_agent():
+                    return await self.agent.ainvoke({
+                        'input': input_text,
+                        **invoke_kwargs
+                    })
+                
+                # Run with timeout
+                try:
+                    result = await asyncio.wait_for(run_agent(), timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    raise TimeoutError(f"Agent execution timed out after {timeout_seconds} seconds")
+                
+                logger.info(f"[{self.name}] Agent execution completed successfully")
+                logger.debug(f"[{self.name}] Raw agent response: {json.dumps(str(result)[:500], indent=2)}")
+                
+            except Exception as e:
+                logger.error(f"[{self.name}] Error during agent execution: {str(e)}", exc_info=True)
+                raise RuntimeError(f"Agent execution failed: {str(e)}")
+            
+            # Process the agent response
+            try:
+                # Extract output from different response formats
+                output = None
+                
+                if hasattr(result, 'output') and result.output is not None:
+                    output = result.output
+                elif hasattr(result, 'content'):
+                    output = result.content
+                elif hasattr(result, 'text'):
+                    output = result.text
+                elif isinstance(result, (str, int, float, bool)):
+                    output = str(result)
+                elif isinstance(result, dict):
+                    if 'output' in result:
+                        output = result['output']
+                    elif 'response' in result:
+                        output = result['response']
+                    elif 'message' in result:
+                        output = result['message']
+                    elif 'messages' in result and result['messages']:
+                        last_msg = result['messages'][-1]
+                        if hasattr(last_msg, 'content'):
+                            output = last_msg.content
+                        elif isinstance(last_msg, dict) and 'content' in last_msg:
+                            output = last_msg['content']
+                        else:
+                            output = str(last_msg)
+                    else:
+                        output = json.dumps(result, default=str)
+                
+                # Ensure output is a non-empty string
+                if not output or not isinstance(output, str):
+                    output = str(output) if output is not None else ""
+                
+                # Clean up the output
+                output = output.strip()
+                
+                if not output:
+                    logger.warning(f"[{self.name}] Empty response from agent")
+                    output = "I received your message but didn't generate a response. Could you try rephrasing your question?"
+                
+                # Log processing time
+                processing_time = time.time() - start_time
+                logger.info(f"[{self.name}] Processing completed in {processing_time:.2f}s")
+                
+                # Prepare the response
+                response = {
+                    'success': True,
+                    'output': output,
+                    'agent_used': self.name,
+                    'metadata': {
+                        'model': self.config.model_name,
+                        'temperature': self.config.temperature,
+                        'processing_time_seconds': processing_time,
+                        'tools_used': tool_names,
+                        'response_length': len(output)
+                    }
+                }
+                
+                logger.debug(f"[{self.name}] Final response: {json.dumps({k: str(v)[:200] for k, v in response.items()}, indent=2)}")
+                return response
+                
+            except Exception as e:
+                logger.error(f"[{self.name}] Error processing agent response: {str(e)}\nRaw response: {str(result)[:1000]}", exc_info=True)
+                raise RuntimeError(f"Failed to process agent response: {str(e)}")
+            
+        except Exception as e:
+            # Handle all other exceptions
+            processing_time = time.time() - start_time
+            error_msg = f"Error in {self.name} agent after {processing_time:.2f}s: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            
+            return {
+                'success': False,
+                'output': f"I encountered an error while processing your request with {self.name}. Please try again or rephrase your question.",
+                'error': str(e),
+                'agent_used': self.name,
+                'metadata': {
+                    'model': self.config.model_name,
+                    'processing_time_seconds': processing_time,
+                    'error_type': type(e).__name__
+                }
+            }
+
+class ResearcherAgent(BaseAgent):
+    """Agent specialized in finding and gathering information from various sources.
+    
+    This agent is designed to handle research-intensive tasks by leveraging available tools
+    to gather, analyze, and synthesize information from multiple sources. It includes robust
+    error handling for API limits and missing dependencies.
+    """
+    
+    def __init__(self, tools: List[Any] = None):
+        from llm.config import settings
+        import os
+        
+        # Define research-specific system prompt with clear instructions
+        system_prompt = """You are a highly skilled research assistant with expertise in finding and comparing products.
+        Your primary responsibility is to help users make informed purchasing decisions by providing detailed product information.
+        
+        INSTRUCTIONS:
+        1. ALWAYS use the brave_search tool to find current product information
+        2. For product searches, you MUST follow this exact format:
+        
+        ===== PRODUCT SEARCH RESULTS =====
+        
+        [Product Brand and Model] - [Price]
+        - Key features: [list 3-5 most important features]
+        - Where to buy: [list retailers with prices if available]
+        - Pros: [list 2-3 pros]
+        - Cons: [list 2-3 cons]
+        - Overall rating: [if available]
+        
+        ===== END OF RESULTS =====
+        
+        IMPORTANT RULES:
+        - ALWAYS use the brave_search tool for product queries
+        - Include prices and availability information
+        - List multiple options when available for comparison
+        - Be specific about model numbers and variants
+        - Include links to purchase when possible
+        - If no products are found, suggest alternative search terms or price ranges
+        - For price limits (e.g., "under 5000"), ensure all suggested products are within budget
+        - If you can't find products in the specified range, suggest the best options closest to the budget
+        - Always verify prices and availability as they may change
+        
+        Example response for "best earphones under 5000":
+        
+        ===== PRODUCT SEARCH RESULTS =====
+        
+        1. boAt Airdopes 141 - ₹1,299
+        - Key features: 42H Playtime, ASAP Charge, IWP Technology, IPX5 Water Resistant
+        - Where to buy: Amazon (₹1,299), Flipkart (₹1,299)
+        - Pros: Great battery life, good sound quality, comfortable fit
+        - Cons: Average noise cancellation, plastic build
+        - Overall rating: 4.2/5
+        
+        2. OnePlus Nord Buds 2 - ₹2,999
+        - Key features: 36H Playtime, Active Noise Cancellation, Fast Charging
+        - Where to buy: OnePlus Store (₹2,999), Amazon (₹2,999)
+        - Pros: Good ANC, clear sound, premium build
+        - Cons: Slightly bulky, touch controls can be sensitive
+        - Overall rating: 4.3/5
+        
+        ===== END OF RESULTS =====
+        """
+        
+        # Check for required API keys and services
+        self.missing_apis = []
+        
+        # Check for Groq API key
+        if not os.getenv('GROQ_API_KEY'):
+            self.missing_apis.append('Groq')
+            
+        # Check for other required API keys
+        if not os.getenv('BRAVE_API_KEY'):
+            self.missing_apis.append('Brave Search')
+        
+        # Update system prompt with any missing API information
+        if self.missing_apis:
+            missing_str = ", ".join(self.missing_apis)
+            system_prompt += f"\n\nNOTE: The following services are not available: {missing_str}. "
+            system_prompt += "Some features may be limited. Please check your API configuration."
+        
+        # Ensure tools are properly initialized
+        if tools is None:
+            from .tools.brave_search import BraveSearchTool
+            tools = [BraveSearchTool()]
+            
+        # Configure the agent with appropriate settings
+        config = AgentConfig(
+            name="researcher",
+            description="Specialized in finding and gathering information from various sources using BraveSearch.",
+            model_name=settings.REASONING_MODEL if os.getenv('GROQ_API_KEY') else 'mixtral-8x7b-32768',
+            temperature=0.3,  # Lower temperature for more focused, deterministic responses
+            system_prompt=system_prompt,
+            tools=tools,
+            max_iterations=5,  # Reduced from 8 to prevent excessive API usage
+            verbose=True
+        )
+        
+        # Initialize the base agent
+        super().__init__(config)
+        
+        # Initialize logging and metrics
+        self.logger = logging.getLogger("ResearcherAgent")
+        self.search_count = 0
+        self.last_search_time = None
+        
+    async def process(self, input_text: str, **kwargs) -> Dict[str, Any]:
+        """Process a research query with enhanced error handling and API management.
+        
+        Args:
+            input_text: The research query or question
+            **kwargs: Additional arguments including:
+                - chat_history: Previous messages in the conversation
+                - conversation_id: ID of the current conversation
+                - user_id: ID of the current user
+                
+        Returns:
+            Dict containing the research results and metadata
+        """
+        start_time = time.time()
+        self.logger.info(f"[RESEARCHER] Starting to process query: {input_text}")
+        
+        try:
+            # Check for missing required APIs
+            if self.missing_apis:
+                missing_str = ", ".join(self.missing_apis)
+                error_msg = (
+                    "I'm currently unable to perform web searches "
+                    f"because the following services are not configured: {missing_str}. "
+                    "Please check your API configuration to enable this feature."
+                )
+                self.logger.error(f"[RESEARCHER] Missing required APIs: {missing_str}")
+                return {
+                    'output': error_msg,
+                    'metadata': {
+                        'missing_apis': self.missing_apis,
+                        'tool_used': None,
+                        'error': 'missing_apis',
+                        'processing_time': time.time() - start_time
+                    }
+                }
+            
+            # Log available tools
+            tool_names = [tool.name for tool in self.config.tools] if hasattr(self.config, 'tools') and self.config.tools else []
+            self.logger.info(f"[RESEARCHER] Available tools: {tool_names}")
+            
+            # Preprocess the query for better search results
+            processed_query = self._preprocess_query(input_text)
+            self.logger.info(f"[RESEARCHER] Preprocessed query: {processed_query}")
+            
+            # Track search metrics
+            self.search_count += 1
+            self.last_search_time = time.time()
+            
+            # Enhance product queries
+            if any(term in processed_query.lower() for term in ['best', 'recommend', 'suggest', 'under $', 'under ₹', 'under ']):
+                processed_query = f"SEARCH AND COMPARE: {processed_query} - Include prices, features, pros/cons, and where to buy"
+                self.logger.info(f"[RESEARCHER] Enhanced product query: {processed_query}")
+            
+            # Process with the base agent's implementation
+            self.logger.info("[RESEARCHER] Invoking base agent with tools...")
+            result = await super().process(processed_query, **kwargs)
+            processing_time = time.time() - start_time
+            
+            self.logger.info(f"[RESEARCHER] Base agent completed in {processing_time:.2f}s")
+            
+            # Ensure result is a dictionary
+            if not isinstance(result, dict):
+                result = {'output': str(result), 'metadata': {}}
+            
+            # Add processing metadata
+            if 'metadata' not in result:
+                result['metadata'] = {}
+            
+            result['metadata'].update({
+                'tool_used': 'brave_search',
+                'processing_time': processing_time,
+                'search_count': self.search_count
+            })
+            
+            self.logger.info("[RESEARCHER] Successfully processed research query")
+            return result
+            
+        except Exception as e:
+            error_msg = str(e)
+            processing_time = time.time() - start_time
+            self.logger.error(f"[RESEARCHER] Error processing query: {error_msg}", exc_info=True)
+            
+            # Handle specific error cases
+            if "402" in error_msg or "credit" in error_msg:
+                error_response = {
+                    'output': "I've reached my search limit for now. Please try again later or check your API credits.",
+                    'metadata': {
+                        'error': 'api_credit_limit',
+                        'tool_used': 'brave_search',
+                        'processing_time': processing_time
+                    }
+                }
+            elif "rate limit" in error_msg.lower() or "too many requests" in error_msg.lower():
+                error_response = {
+                    'output': "I'm getting too many requests right now. Please wait a moment and try again.",
+                    'metadata': {
+                        'error': 'rate_limit',
+                        'tool_used': 'brave_search',
+                        'processing_time': processing_time
+                    }
+                }
+            else:
+                error_response = {
+                    'output': "I encountered an error while processing your research request. Please try again with a different query.",
+                    'metadata': {
+                        'error': 'processing_error',
+                        'tool_used': 'brave_search',
+                        'processing_time': processing_time,
+                        'details': error_msg[:500]  # Truncate long error messages
+                    }
+                }
+            
+            self.logger.error(f"[RESEARCHER] Error response: {json.dumps(error_response, default=str)}")
+            return error_response
+
+    def _preprocess_query(self, query: str) -> str:
+        """Preprocess the research query for better search results.
+        
+        Args:
+            query: The original user query
+                
+        Returns:
+            Processed query string optimized for search
+        """
+        # Basic preprocessing - can be extended with more sophisticated logic
+        query = query.strip()
+        
+        # Remove common phrases that don't help with search
+        remove_phrases = [
+            "can you", "please", "could you", "would you", 
+            "i need", "i want", "i'm looking for", "tell me"
+        ]
+        
+        for phrase in remove_phrases:
+            if query.lower().startswith(phrase):
+                query = query[len(phrase):].strip(" ,.?!")
+        
+        # Ensure the query is a question if it's a research query
+        if not any(query.endswith(punc) for punc in "?"):
+            if not any(word in query.lower().split() for word in ["what", "why", "how", "when", "where", "who"]):
+                query = f"What is {query}?"
+            else:
+                query = f"{query}?"
+                
+        return query
+        
+    def _postprocess_research(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Post-process the research results for better presentation.
+        
+        Args:
+            result: The raw result from the agent
+            
+        Returns:
+            Processed result with enhanced formatting
+        """
+        if not isinstance(result, dict):
+            return {'output': str(result), 'metadata': {}}
+            
+        # Ensure we have the expected structure
+        output = result.get('output', '')
+        metadata = result.get('metadata', {})
+        
+        # Add processing metadata
+        metadata.update({
+            'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'agent': 'researcher',
+            'search_count': self.search_count
+        })
+        
+        # Ensure the response includes citations if sources were used
+        if 'sources' in result.get('metadata', {}) and 'source:' not in output.lower():
+            sources = result['metadata']['sources']
+            if sources:
+                output += "\n\nSources:"
+                for i, source in enumerate(sources, 1):
+                    output += f"\n{i}. {source}"
+        
+        # Update the result with processed output and metadata
+        result['output'] = output
+        result['metadata'] = metadata
+        return result
+
+class AnalystAgent(BaseAgent):
+    """Agent specialized in analyzing information and providing insights."""
+    
+    def __init__(self, tools: List[Any] = None):
+            from llm.config import settings
+            from .tools.dummy_tool import DummyTool  # Import a dummy tool
+            
+            # If no tools are provided, use a dummy tool
+            if tools is None:
+                tools = [DummyTool()]
+                
+            config = AgentConfig(
+                name="analyst",
+                description="Specialized in analyzing information and providing insights.",
+                model_name=settings.REASONING_MODEL,  # Use configured reasoning model
+                temperature=0.5,
+                system_prompt="""You are an analytical assistant. Your job is to analyze information, identify patterns, 
+                and provide clear, insightful analysis. Consider multiple perspectives and provide balanced viewpoints. 
+                Highlight key findings and their implications.
+                
+                When you need to perform analysis, you can use the available tools to gather information.""",
+                tools=tools,
+                max_iterations=5
+            )
+            super().__init__(config)
+
+class ResponderAgent(BaseAgent):
+    """Agent specialized in generating friendly and helpful responses.
+    
+    This agent handles general conversations and simple queries without requiring
+    external tools. It's optimized for quick responses to common queries.
+    """
+    
+    def __init__(self, tools: List[Any] = None):
+        from llm.config import settings
+        
+        system_prompt = """You are a friendly and helpful AI assistant. Your primary goals are:
+        1. Provide clear, concise, and helpful responses
+        2. Be polite, empathetic, and engaging in your communication
+        3. Be honest about the limits of your knowledge
+        4. For simple queries (greetings, basic facts, etc.), respond directly without using tools
+        5. Only use tools when explicitly needed for specific information
+        
+        Guidelines:
+        - Keep responses conversational and natural
+        - Be concise but thorough
+        - Admit when you don't know something
+        - For factual questions you're unsure about, say so rather than guessing
+        - For simple greetings or thanks, respond appropriately without using tools
+        - For queries about your capabilities, explain what you can do
+        - For complex queries that require research, suggest using specific search terms
+        """
+        
+        config = AgentConfig(
+            name="responder",
+            description="Specialized in generating friendly and helpful responses.",
+            model_name=settings.CHAT_MODEL,
+            temperature=0.7,  # Slightly lower temperature for more focused responses
+            system_prompt=system_prompt,
+            tools=tools or [],
+            max_iterations=1  # Reduced for faster responses to simple queries
+        )
+        super().__init__(config)
+        
+        # Common greetings and simple queries that don't need tools
+        self.simple_queries = [
+            # Greetings
+            'hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening',
+            'hi there', 'hello there', 'hey there',
+            # Thanks
+            'thanks', 'thank you', 'thanks!', 'thank you!', 'appreciate it', 'thanks a lot',
+            # Simple questions about the assistant
+            'who are you', 'what are you', 'what can you do', 'help', 'what is your name',
+            # Simple acknowledgments
+            'ok', 'okay', 'got it', 'i see', 'understood', 'alright',
+            # Simple goodbyes
+            'bye', 'goodbye', 'see you', 'see ya', 'take care', 'have a good one'
+        ]
+        
+        # Common responses
+        self.common_responses = {
+            'greeting': [
+                "Hello! How can I assist you today?",
+                "Hi there! What can I help you with?",
+                "Hello! How may I be of service?"
+            ],
+            'thanks': [
+                "You're welcome! Is there anything else I can help with?",
+                "Happy to help! Let me know if you need anything else.",
+                "You're welcome! Feel free to ask if you have more questions."
+            ],
+            'capabilities': [
+                "I can help answer questions, provide information, and assist with various tasks. "
+                "I can also analyze images if you provide them. What would you like to know?",
+                "I'm here to help with information, answer questions, and assist with tasks. "
+                "I can also analyze images. How can I assist you today?"
+            ],
+            'goodbye': [
+                "Goodbye! Have a great day!",
+                "See you later! Take care!",
+                "Bye! Feel free to come back if you have more questions."
+            ]
+        }
+        
+    def _is_simple_query(self, query: str) -> bool:
+        """Check if the query is simple enough to handle without tools."""
+        query = query.lower().strip("'\".,!?")
+        # Check for exact matches
+        if query in self.simple_queries:
+            return True
+            
+        # Check for queries that start with these phrases
+        for phrase in ['can you', 'could you', 'would you', 'how to', 'what is', 'who is', 
+                      'when is', 'where is', 'why is', 'how do i', 'tell me about']:
+            if query.startswith(phrase) and len(query.split()) < 10:  # Arbitrary length limit for simple queries
+                return True
+                
+        return False
+        
+    def _get_simple_response(self, query: str) -> str:
+        """Generate a response for simple queries without using tools."""
+        query = query.lower().strip("'\".,!?")
+        
+        # Handle greetings
+        if any(greeting in query for greeting in ['hi', 'hello', 'hey', 'greetings']):
+            return random.choice(self.common_responses['greeting'])
+            
+        # Handle thanks
+        if any(thanks in query for thanks in ['thank', 'thanks', 'appreciate']):
+            return random.choice(self.common_responses['thanks'])
+            
+        # Handle questions about capabilities
+        if any(phrase in query for phrase in ['who are you', 'what are you', 'what can you do', 'help']):
+            return random.choice(self.common_responses['capabilities'])
+            
+        # Handle goodbyes
+        if any(bye in query for bye in ['bye', 'goodbye', 'see you', 'take care']):
+            return random.choice(self.common_responses['goodbye'])
+            
+        # Default response for other simple queries
+        return "I'm here to help! Could you please provide more details about what you're looking for?"
+        
+    async def process(self, input_text: str, **kwargs) -> Dict[str, Any]:
+        """Process input with the responder agent.
+        
+        Args:
+            input_text: The user's input text
+            **kwargs: Additional arguments including conversation context
+            
+        Returns:
+            Dict containing the response and metadata with the following structure:
+            {
+                'output': str,  # The response text
+                'metadata': {
+                    'agent': str,  # Name of the agent
+                    'simple_query': bool,  # Whether this was handled as a simple query
+                    'tools_used': List[str]  # List of tools used, if any
+                }
+            }
+        """
+        # Check if this is a simple query that doesn't need tools
+        if self._is_simple_query(input_text):
+            return {
+                'output': self._get_simple_response(input_text),
+                'metadata': {
+                    'agent': 'responder',
+                    'simple_query': True,
+                    'tools_used': []
+                }
+            }
+            
+        # For non-simple queries, use the base agent's process method
+        try:
+            response = await super().process(input_text, **kwargs)
+            # Ensure the response has the expected structure
+            if not isinstance(response, dict):
+                response = {'output': str(response), 'metadata': {}}
+            if 'metadata' not in response:
+                response['metadata'] = {}
+            response['metadata']['agent'] = 'responder'
+            response['metadata']['simple_query'] = False
+            if 'tools_used' not in response['metadata']:
+                response['metadata']['tools_used'] = []
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"Error in ResponderAgent.process: {str(e)}", exc_info=True)
+            return {
+                'output': "I encountered an error processing your request. Please try again or rephrase your question.",
+                'metadata': {
+                    'agent': 'responder',
+                    'error': str(e),
+                    'tools_used': []
+                }
+            }
+
+class QualityAgent(BaseAgent):
+    """Agent specialized in refining and improving responses."""
+    
+    def __init__(self, tools: List[Any] = None):
+        from llm.config import settings
+        config = AgentConfig(
+            name="quality",
+            description="Specialized in refining and improving responses for quality and clarity.",
+            model_name=settings.REASONING_MODEL,  # Use configured reasoning model
+            temperature=0.3,
+            system_prompt="""You are a quality assurance specialist. Your job is to review and improve responses 
+            for clarity, conciseness, accuracy, and tone. Ensure the response is well-structured, free of errors, 
+            and effectively addresses the user's query.""",
+            tools=tools or [],
+            max_iterations=2
+        )
+        super().__init__(config)
+
+def create_base_agents(tools: List[Any] = None) -> Dict[str, BaseAgent]:
+    """
+    Create and return a dictionary of base agents.
+    
+    Args:
+        tools: List of tools to make available to the agents
+        
+    Returns:
+        Dict mapping agent names to agent instances
+    """
+    agents = {
+        "researcher": ResearcherAgent(tools=tools),
+        "analyst": AnalystAgent(tools=tools),
+        "responder": ResponderAgent(tools=tools),
+        "quality": QualityAgent(tools=tools)
+    }
+    
+    logger.info(f"Created {len(agents)} base agents")
+    return agents
+
+def get_agent_class(agent_name: str) -> Optional[Type[BaseAgent]]:
+    """
+    Get an agent class by name.
+    
+    Args:
+        agent_name: Name of the agent class to retrieve
+        
+    Returns:
+        The agent class if found, None otherwise
+    """
+    agent_classes = {
+        'researcher': ResearcherAgent,
+        'analyst': AnalystAgent,
+        'responder': ResponderAgent,
+        'quality': QualityAgent
+    }
+    return agent_classes.get(agent_name.lower())

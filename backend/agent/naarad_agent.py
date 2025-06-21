@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional, Union, Type, TypeVar
+from typing import Dict, Any, List, Optional, Union, Type, TypeVar, Literal, TYPE_CHECKING
 import os
 import uuid
 import json
@@ -6,12 +6,46 @@ import logging
 import importlib
 from datetime import datetime
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, validate_call
+from pydantic.v1 import BaseModel as BaseModelV1
 
 # LangChain imports
 from langchain.agents import AgentExecutor
-from langchain.tools import BaseTool as LangChainBaseTool
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.tools import BaseTool as LangChainBaseTool
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.language_models import BaseChatModel
+from langchain.schema.runnable import RunnableSequence
+from langchain.chains import LLMChain
+from langchain_core.callbacks.manager import CallbackManagerForChainRun
+from langchain.callbacks.manager import AsyncCallbackManager
+from langchain_core.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+
+# Custom imports for agent creation
+from langchain.agents import ZeroShotAgent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnablePassthrough, RunnableSequence
+
+# LangChain compatibility
+if TYPE_CHECKING:
+    from langchain_core.chains import LLMChain
+else:
+    LLMChain = Any
+
+# Groq import
+from groq import Groq
+
+# Local imports
+from dotenv import load_dotenv
+from llm.config import settings
+
+# Type hints
+AgentExecutor = TypeVar('AgentExecutor', bound='AgentExecutor')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Local imports
 from dotenv import load_dotenv
@@ -29,23 +63,37 @@ _base_agents = None
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_orchestrator():
+def get_orchestrator(base_agents=None):
     global _orchestrator
     if _orchestrator is None:
         from .orchestrator import AgentOrchestrator
-        _orchestrator = AgentOrchestrator()
+        _orchestrator = AgentOrchestrator(base_agents=base_agents or {})
     return _orchestrator
 
 def get_base_agents():
     global _base_agents
     if _base_agents is None:
         from .agents import (
-            create_base_agents,
             ResearcherAgent,
             AnalystAgent,
             ResponderAgent,
             QualityAgent
         )
+        from langchain_core.language_models import BaseChatModel
+        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        
+        # Create the agent using ZeroShotAgent
+        llm = BaseChatModel.from_model_name("llama-7b")
+        prompt = ChatPromptTemplate.from_template(
+            "You are a {agent_name} agent. Please respond accordingly.",
+            agent_name=MessagesPlaceholder()
+        )
+        agent = ZeroShotAgent.from_llm_and_tools(
+            llm=llm,
+            tools=[LLaVAVisionTool(), BraveSearchTool()],
+            prompt=prompt
+        )
+        
         _base_agents = {
             'researcher': ResearcherAgent,
             'analyst': AnalystAgent,
@@ -57,12 +105,15 @@ def get_base_agents():
 
 class ConversationContext(BaseModel):
     """Represents the context for a conversation."""
+    
     model_config = ConfigDict(
         extra='forbid',
         validate_assignment=True,
         json_encoders={
             datetime: lambda v: v.isoformat()
-        }
+        },
+        arbitrary_types_allowed=True,  # Allow arbitrary types for LangChain compatibility
+        from_attributes=True  # Enable model validation from attributes
     )
     
     user_id: str = Field(
@@ -94,48 +145,90 @@ class ConversationContext(BaseModel):
         """
         self.updated_at = datetime.utcnow()
         return self
+    
+    def model_post_init(self, __context):
+        """Post-init processing for Pydantic v2 compatibility."""
+        pass
+
+# Import from the new modular agent structure
+from agent.agents import AgentConfig
+from agent.factory import AgentManager
 
 class NaaradAgent:
     def __init__(self, enable_monitoring: bool = True):
         """Initialize the Naarad AI agent with its tools, agents, and monitoring."""
-        load_dotenv()
+        # Load environment variables from .env file in the backend directory
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(backend_dir, '.env')
+        load_dotenv(env_path)
         
         # Initialize core components
         self.vision_tool = LLaVAVisionTool()
         self.brave_search = BraveSearchTool()
         self.memory_manager = memory_manager
         self.monitor = agent_monitor if enable_monitoring else None
+        self._initialized = False
+        
+        # Import DummyTool
+        from .tools import DummyTool
         
         # Create tools for different agent types
         research_tools = [self.brave_search]
-        analysis_tools = []
+        analysis_tools = [DummyTool()]  # Add DummyTool for analyst
         responder_tools = [self.vision_tool]
-        quality_tools = []
+        quality_tools = [DummyTool()]  # Add DummyTool for quality agent
         
-        # Get base agent classes and creator function
-        from .agents import create_base_agents, get_agent_class
+        # Initialize agent manager
+        self.agent_manager = AgentManager()
         
-        # Create base agents with appropriate tools
+        # Create and register agents with their respective tools
         self.base_agents = {}
-        agent_tools = {
-            'researcher': research_tools,
-            'analyst': analysis_tools,
-            'responder': responder_tools,
-            'quality': quality_tools
-        }
         
-        # Create instances of each agent
-        for agent_name, tools in agent_tools.items():
-            agent_class = get_agent_class(agent_name)
-            if agent_class:
-                self.base_agents[agent_name] = agent_class(tools=tools)
+        # Agent configurations with their tools
+        agent_configs = [
+            ('responder', {'tools': responder_tools}),
+            ('researcher', {'tools': research_tools}),
+            ('analyst', {'tools': analysis_tools}),
+            ('quality', {'tools': quality_tools})
+        ]
+        
+        for agent_name, config in agent_configs:
+            try:
+                # Create agent using the correct method signature
+                agent = self.agent_manager.create_agent(
+                    name=agent_name,
+                    agent_type=agent_name,
+                    **config,  # Pass tools and other config as kwargs
+                    model_name="llama3-8b-8192",
+                    temperature=0.7,
+                    max_iterations=5
+                )
+                self.base_agents[agent_name] = agent
+                logger.info(f"Created {agent_name} agent with {len(config['tools'])} tools")
+                
+            except Exception as e:
+                logger.error(f"Failed to create {agent_name} agent: {str(e)}")
+                # Create a fallback agent
+                try:
+                    fallback_agent = self.agent_manager.create_agent(
+                        name=agent_name,
+                        agent_type=agent_name,
+                        tools=[],
+                        model_name="llama3-8b-8192",
+                        temperature=0.7
+                    )
+                    self.base_agents[agent_name] = fallback_agent
+                except Exception as fallback_error:
+                    logger.error(f"Failed to create fallback {agent_name} agent: {str(fallback_error)}")
+                    # Skip this agent if both main and fallback creation fail
+                    continue
         
         logger.info(f"Initialized {len(self.base_agents)} base agents: {list(self.base_agents.keys())}")
         
-        # Initialize orchestrator with the agents
-        self.orchestrator = get_orchestrator()
-        if hasattr(self.orchestrator, 'base_agents'):
-            self.orchestrator.base_agents = self.base_agents
+        # Initialize orchestrator with the agent manager and base agents
+        self.orchestrator = get_orchestrator(base_agents=self.base_agents)
+        if hasattr(self.orchestrator, 'agent_manager'):
+            self.orchestrator.agent_manager = self.agent_manager
         
         # System personality and constraints
         self.personality = {
@@ -158,6 +251,59 @@ class NaaradAgent:
             ]
         }
     
+    async def ensure_initialized(self):
+        """Ensure the agent is properly initialized."""
+        if not self._initialized:
+            # Initialize memory manager
+            if hasattr(self.memory_manager, 'ensure_initialized'):
+                await self.memory_manager.ensure_initialized()
+            self._initialized = True
+
+    async def _process_images(self, images: List[str], context: ConversationContext) -> None:
+        """Process images and add them to the context.
+        
+        Args:
+            images: List of image URLs or base64 strings
+            context: The conversation context to update
+        """
+        if not images:
+            return
+            
+        try:
+            # Add image information to context metadata
+            if 'images' not in context.metadata:
+                context.metadata['images'] = []
+                
+            for i, image in enumerate(images):
+                image_info = {
+                    'index': i,
+                    'type': 'url' if image.startswith('http') else 'base64',
+                    'processed': False
+                }
+                
+                # If it's a URL, store it directly
+                if image.startswith('http'):
+                    image_info['url'] = image
+                    image_info['processed'] = True
+                else:
+                    # For base64, we'll need to handle it differently
+                    # For now, just store the fact that we have image data
+                    image_info['has_data'] = True
+                    image_info['data_length'] = len(image)
+                
+                context.metadata['images'].append(image_info)
+                
+            # Mark that we have images in this conversation
+            context.metadata['has_images'] = True
+            context.metadata['image_count'] = len(images)
+            
+            logger.info(f"Processed {len(images)} images for conversation {context.conversation_id}")
+            
+        except Exception as e:
+            logger.error(f"Error processing images: {str(e)}", exc_info=True)
+            # Don't fail the entire request if image processing fails
+            pass
+
     async def process_message(
         self, 
         message: str, 
@@ -177,97 +323,64 @@ class NaaradAgent:
         Returns:
             Dict containing response and metadata
         """
-        start_time = datetime.utcnow()
-        
-        # Initialize or retrieve conversation context
-        context = await self._get_or_create_context(conversation_id, user_id)
-        
         try:
-            # Track the request
-            with agent_monitor.track_request('naarad_agent'):
-                logger.info(f"Processing message in conversation {context.conversation_id}")
+            # Ensure agent is initialized
+            await self.ensure_initialized()
+            
+            # Get or create conversation context
+            context = await self._get_or_create_context(conversation_id, user_id)
+            if context is None:
+                raise ValueError("Failed to create or retrieve conversation context")
                 
-                # Process any images if provided
-                images = kwargs.get('images', [])
-                try:
-                    context = await self._process_images(images, context)
-                    logger.info(f"Processed {len(images)} images")
-                except Exception as e:
-                    logger.error(f"Error processing images: {str(e)}", exc_info=True)
-                    context.metadata['image_processing_error'] = str(e)
-                
-                # Prepare the context for processing
-                processing_context = {
-                    **context.metadata,
-                    'images_processed': len(images) > 0,
-                    'user_metadata': kwargs.get('user_metadata', {})
-                }
-                
-                # Process the message through the orchestrator
-                try:
-                    logger.info(f"Sending to orchestrator: {message[:100]}...")
-                    response = await self.orchestrator.process_query(
-                        user_input=message,
-                        context=processing_context,
-                        conversation_id=context.conversation_id,
-                        user_id=context.user_id
-                    )
-                    logger.info(f"Received response from orchestrator")
-                except Exception as e:
-                    logger.error(f"Error in orchestrator: {str(e)}", exc_info=True)
-                    return {
-                        'success': False,
-                        'response': f"I encountered an error while processing your request: {str(e)}",
-                        'conversation_id': context.conversation_id,
-                        'metadata': {
-                            'error': str(e),
-                            'error_type': type(e).__name__
-                        }
-                    }
-                
-                # Update conversation metadata
-                context.metadata.update({
-                    'last_interaction': datetime.utcnow().isoformat(),
-                    'message_count': context.metadata.get('message_count', 0) + 1
-                })
-                
-                # Prepare messages for saving
-                messages = [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": response}
-                ]
-                
-                # Save the updated context with messages
-                self.memory_manager.save_conversation(
-                    conversation_id=context.conversation_id,
-                    user_id=context.user_id,
-                    messages=messages,
-                    metadata=context.metadata
-                )
-                
-                # Calculate processing time
-                processing_time = (datetime.utcnow() - start_time).total_seconds()
-                
-                # Log successful processing
-                if self.monitor:
-                    self.monitor.record_processing_time(
-                        agent_name='naarad_agent',
-                        processing_time=processing_time,
-                        conversation_id=context.conversation_id
-                    )
-                
-                return {
-                    'success': True,
-                    'response': response['output'],
+            # Update the timestamp
+            context = context.update_timestamp()
+            
+            # Process any images if provided
+            if 'images' in kwargs:
+                await self._process_images(kwargs['images'], context)
+            
+            # Process the message with the orchestrator
+            response = await self.orchestrator.process_query(
+                user_input=message,
+                context={
                     'conversation_id': context.conversation_id,
                     'user_id': context.user_id,
-                    'metadata': {
-                        'processing_time_seconds': processing_time,
-                        'agent_used': response.get('agent_used', 'unknown'),
-                        'supporting_agents': response.get('metadata', {}).get('supporting_agents', [])
-                    }
+                    'metadata': context.metadata,
+                    **kwargs
                 }
-                
+            )
+            
+            # Ensure response is a string
+            response_text = response.get('output', '')
+            if not isinstance(response_text, str):
+                response_text = str(response_text)
+            
+            # Update conversation in memory
+            await self.memory_manager.save_conversation(
+                conversation_id=context.conversation_id,
+                user_id=context.user_id,
+                messages=[{
+                    'role': 'user',
+                    'content': message,
+                    'timestamp': datetime.utcnow().isoformat()
+                }, {
+                    'role': 'assistant',
+                    'content': response_text,
+                    'timestamp': datetime.utcnow().isoformat()
+                }],
+                metadata=context.metadata
+            )
+            
+            return {
+                'success': True,
+                'response': response,
+                'conversation_id': context.conversation_id,
+                'metadata': {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'agent_used': response.get('agent_used', 'unknown')
+                }
+            }
+            
         except Exception as e:
             error_id = str(uuid.uuid4())
             logger.error(f"Error processing message (ID: {error_id}): {str(e)}", exc_info=True)
@@ -277,7 +390,7 @@ class NaaradAgent:
                     agent_name='naarad_agent',
                     error_type=type(e).__name__,
                     error_message=str(e),
-                    conversation_id=context.conversation_id
+                    conversation_id=context.conversation_id if 'context' in locals() else None
                 )
             
             return {
@@ -288,8 +401,8 @@ class NaaradAgent:
                     'message': 'An error occurred while processing your request.',
                     'details': str(e) if str(e) else 'No additional details available'
                 },
-                'conversation_id': context.conversation_id,
-                'user_id': context.user_id
+                'conversation_id': context.conversation_id if 'context' in locals() else None,
+                'user_id': user_id
             }
     
     async def _get_or_create_context(
@@ -300,63 +413,39 @@ class NaaradAgent:
         """Retrieve or create a conversation context."""
         if conversation_id:
             # Try to load existing conversation
-            conversation = self.memory_manager.get_conversation(conversation_id, user_id)
-            if conversation:
-                return ConversationContext(
-                    user_id=user_id or conversation.get('user_id', str(uuid.uuid4())),
-                    conversation_id=conversation_id,
-                    metadata=conversation.get('metadata', {}),
-                    created_at=datetime.fromisoformat(conversation['created_at']),
-                    updated_at=datetime.fromisoformat(conversation['updated_at'])
-                )
+            try:
+                conversation = await self.memory_manager.get_conversation(conversation_id, user_id or "anonymous")
+                if conversation:
+                    # Ensure we have proper timestamps
+                    metadata = conversation.get('metadata', {})
+                    if 'created_at' not in metadata:
+                        metadata['created_at'] = datetime.utcnow().isoformat()
+                    if 'updated_at' not in metadata:
+                        metadata['updated_at'] = datetime.utcnow().isoformat()
+                        
+                    return ConversationContext(
+                        user_id=user_id or conversation.get('user_id', str(uuid.uuid4())),
+                        conversation_id=conversation_id,
+                        metadata=metadata,
+                        created_at=datetime.fromisoformat(metadata['created_at']),
+                        updated_at=datetime.fromisoformat(metadata['updated_at'])
+                    )
+            except Exception as e:
+                logger.warning(f"Error loading conversation {conversation_id}: {str(e)}")
         
         # Create a new conversation context
+        now = datetime.utcnow()
         return ConversationContext(
             user_id=user_id or str(uuid.uuid4()),
             conversation_id=conversation_id or f"conv_{uuid.uuid4().hex[:8]}",
             metadata={
-                'created_at': datetime.utcnow().isoformat(),
-                'updated_at': datetime.utcnow().isoformat(),
+                'created_at': now.isoformat(),
+                'updated_at': now.isoformat(),
                 'message_count': 0
-            }
+            },
+            created_at=now,
+            updated_at=now
         )
-    
-    async def _process_images(
-        self, 
-        images: List[Any], 
-        context: ConversationContext
-    ) -> ConversationContext:
-        """Process any attached images and update the context."""
-        if not images:
-            return context
-            
-        image_descriptions = []
-        
-        for img_data in images:
-            try:
-                description = await self.vision_tool.process_image(img_data)
-                image_descriptions.append(description)
-            except Exception as e:
-                logger.error(f"Error processing image: {e}")
-                continue
-        
-        if image_descriptions:
-            # Store image descriptions in conversation metadata
-            if 'images' not in context.metadata:
-                context.metadata['images'] = []
-                
-            context.metadata['images'].extend([
-                {
-                    'description': desc,
-                    'processed_at': datetime.utcnow().isoformat()
-                }
-                for desc in image_descriptions
-            ])
-            
-            # Update the context timestamp
-            context.update_timestamp()
-        
-        return context
     
     def get_agent_info(self) -> Dict[str, Any]:
         """Get information about the agent and its capabilities."""
@@ -376,24 +465,46 @@ class NaaradAgent:
             }
         }
     
-    def get_conversation_history(
+    async def get_conversation_history(
         self, 
         conversation_id: str, 
         user_id: str = None,
         limit: int = 100,
         offset: int = 0
     ) -> Dict[str, Any]:
-        """Retrieve conversation history with pagination."""
+        """Retrieve conversation history with pagination.
+        
+        Args:
+            conversation_id: The ID of the conversation to retrieve
+            user_id: Optional user ID for authorization
+            limit: Maximum number of messages to return
+            offset: Number of messages to skip
+            
+        Returns:
+            Dict containing conversation history and metadata
+        """
         try:
-            conversation = self.memory_manager.get_conversation(conversation_id, user_id)
+            # Ensure we're initialized
+            await self.ensure_initialized()
+            
+            # Get conversation from memory manager
+            conversation = await self.memory_manager.get_conversation(conversation_id, user_id or "anonymous")
             if not conversation:
                 raise HTTPException(status_code=404, detail="Conversation not found")
                 
+            # Get messages and apply pagination
             messages = conversation.get('messages', [])
             total_messages = len(messages)
             
             # Apply pagination
             paginated_messages = messages[offset:offset + limit]
+            
+            # Ensure timestamps are present
+            metadata = conversation.get('metadata', {})
+            if 'created_at' not in metadata:
+                metadata['created_at'] = datetime.utcnow().isoformat()
+            if 'updated_at' not in metadata:
+                metadata['updated_at'] = datetime.utcnow().isoformat()
             
             return {
                 'success': True,
@@ -405,8 +516,8 @@ class NaaradAgent:
                 'limit': limit,
                 'messages': paginated_messages,
                 'metadata': {
-                    'created_at': conversation.get('created_at'),
-                    'updated_at': conversation.get('updated_at')
+                    'created_at': metadata['created_at'],
+                    'updated_at': metadata['updated_at']
                 }
             }
             
@@ -417,21 +528,57 @@ class NaaradAgent:
                 detail=f"Error retrieving conversation: {str(e)}"
             )
     
-    def get_agent_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics for all agents."""
+    async def get_agent_metrics(self) -> Dict[str, Any]:
+        """Get performance metrics for all agents.
+        
+        Returns:
+            Dict containing agent metrics and status information
+        """
         if not self.monitor:
             return {
                 'success': False,
-                'error': 'Monitoring is not enabled'
+                'error': 'Monitoring is not enabled for this agent',
+                'metrics': {},
+                'timestamp': datetime.utcnow().isoformat()
             }
             
-        return {
-            'success': True,
-            'metrics': {
-                'agent_performance': self.monitor.get_agent_performance(),
-                'average_processing_time': self.monitor.get_average_processing_time()
+        try:
+            # Ensure we're initialized
+            await self.ensure_initialized()
+            
+            # Get metrics from monitor
+            metrics = {}
+            if hasattr(self.monitor, 'get_metrics'):
+                if hasattr(self.monitor.get_metrics, '__await__'):
+                    metrics = await self.monitor.get_metrics()
+                else:
+                    metrics = self.monitor.get_metrics()
+            
+            # Add basic agent info if available
+            if not metrics.get('agents'):
+                metrics['agents'] = {
+                    name: {
+                        'status': 'active' if agent.is_initialized() else 'inactive',
+                        'last_used': getattr(agent, 'last_used', 'never')
+                    }
+                    for name, agent in self.base_agents.items()
+                }
+            
+            return {
+                'success': True,
+                'metrics': metrics,
+                'timestamp': datetime.utcnow().isoformat(),
+                'agent_count': len(self.base_agents)
             }
-        }
+            
+        except Exception as e:
+            logger.error(f"Error retrieving agent metrics: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'metrics': {},
+                'timestamp': datetime.utcnow().isoformat()
+            }
 
 # Singleton instance
 naarad_agent = NaaradAgent()

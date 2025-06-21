@@ -1,10 +1,13 @@
+"""Chat router for handling chat-related endpoints."""
+
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional, Dict, Any, Annotated
 import logging
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from datetime import datetime, timedelta
+
+# Import compatibility layer
+from agent.compat import get_rate_limiter, create_compatible_model_config
 
 from agent.naarad_agent import naarad_agent
 from config.config import settings
@@ -13,13 +16,19 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Rate limiting setup
-limiter = Limiter(key_func=get_remote_address)
-# Default rate limit: 100 requests per minute
-rate_limit = settings.RATE_LIMIT
+try:
+    Limiter, get_remote_address = get_rate_limiter()
+    limiter = Limiter(key_func=get_remote_address)
+    # Default rate limit: 100 requests per minute
+    rate_limit = settings.rate_limit
+except ImportError:
+    logger.warning("Rate limiting not available")
+    limiter = None
+    rate_limit = "100/minute"
 
 class ChatRequest(BaseModel):
     """Request model for chat endpoint."""
-    model_config = ConfigDict(
+    model_config = create_compatible_model_config(
         str_strip_whitespace=True,
         str_min_length=1,
         str_max_length=5000,
@@ -59,9 +68,8 @@ class ChatRequest(BaseModel):
         return v[-100:] if v else []
 
 @router.post("/chat")
-@limiter.limit(rate_limit)
 async def chat(
-    request: Request,  # Required for rate limiting
+    request: Request,
     chat_request: ChatRequest
 ):
     """
@@ -82,8 +90,26 @@ async def chat(
         process_time = (datetime.utcnow() - start_time).total_seconds()
         logger.info(f"Chat processed in {process_time:.2f}s")
         
+        # Extract the actual message from the response structure
+        if isinstance(response, dict):
+            # The response from naarad_agent contains the message in 'response.output'
+            if 'response' in response and isinstance(response['response'], dict) and 'output' in response['response']:
+                message = response['response']['output']
+            # Fallback for older or direct message formats
+            elif 'message' in response:
+                message = response['message']
+            elif 'text' in response:
+                message = response['text']
+            elif 'output' in response:
+                message = response['output']
+            else:
+                # If no clear message field, stringify for debugging
+                message = str(response)
+        else:
+            message = str(response)
+        
         return {
-            "message": response,
+            "message": message,
             "conversation_id": chat_request.conversation_id or "",
             "sources": [],
             "processing_time": f"{process_time:.2f}s"
