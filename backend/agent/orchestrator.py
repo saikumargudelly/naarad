@@ -200,74 +200,46 @@ class AgentOrchestrator:
         context: Dict[str, Any],
         memory: Any
     ) -> Optional[str]:
-        """Identify if the query belongs to a specific domain.
-        
-        This method analyzes the user input and context to determine the most appropriate
-        agent to handle the query. It uses a series of checks to identify different types
-        of queries and route them to the appropriate agent.
-        
-        Args:
-            user_input: The user's input text
-            context: Additional context including any attached files or metadata
-            memory: The conversation memory (can be a coroutine or dict)
-            
-        Returns:
-            Name of the domain agent to handle the query, or None for default handling
-        """
+        """Identify the primary domain for the user's query."""
         try:
-            # Handle case where memory might be a coroutine
-            mem = memory
-            if hasattr(memory, '__await__'):
-                mem = await memory
-                
             input_lower = user_input.lower().strip()
             
-            # Check for image-related queries
-            if context.get('has_image') or any(word in input_lower for word in ['image', 'picture', 'photo']):
-                return 'responder'  # Image queries go to responder which can use vision tools
-                
-            # Check for simple greetings and conversational queries
-            greetings = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening']
-            if any(input_lower.startswith(greeting) for greeting in greetings) or len(input_lower.split()) < 3:
-                return 'responder'  # Short, simple queries go to responder
-                
-            # Check for simple math questions (e.g., "what is 2 + 2" or "calculate 5 * 3")
-            math_phrases = ['what is', 'what\'s', 'calculate', 'compute', 'solve', 'how much is', 'add', 'subtract', 'multiply', 'divide']
-            math_operators = ['+', '-', '*', '/', 'plus', 'minus', 'times', 'divided by', 'x', '×', '÷']
-            
-            if any(phrase in input_lower for phrase in math_phrases) and \
-               any(op in input_lower for op in math_operators):
-                return 'responder'  # Simple math questions go to responder
-                
-            # Check for general knowledge questions that don't need web search
-            general_knowledge = ['who is', 'what is', 'when was', 'where is', 'how to', 'why is', 'what are']
-            if any(input_lower.startswith(phrase) for phrase in general_knowledge) and \
-               not any(word in input_lower for word in ['recent', 'latest', 'current', 'today', 'yesterday']):
-                return 'responder'  # General knowledge questions that don't need current info
-                
-            # Check for research or web search needed
+            # --- Domain Identification Logic ---
+            # The order of these checks is important. More specific checks should come first.
+
+            # 1. Check for research/web search keywords first, as these often need live data.
             research_keywords = [
                 'research', 'find', 'look up', 'search for', 'latest', 
                 'current', 'recent', 'news', 'update', 'score', 'live', 
-                'vs', 'cricket', 'weather', 'temperature'
+                'vs', 'cricket', 'weather', 'temperature', 'forecast', 'rain', 'climate'
             ]
             if any(keyword in input_lower for keyword in research_keywords):
                 return 'researcher'
 
-            # Check for analysis or comparison queries
+            # 2. Check for image-related queries.
+            if context.get('has_image', False) or 'image' in input_lower or 'photo' in input_lower:
+                return 'responder'  # Will use vision tool
+
+            # 3. Check for analysis or comparison queries.
             analysis_keywords = ['analyze', 'compare', 'analysis', 'breakdown', 'pros and cons']
             if any(keyword in input_lower for keyword in analysis_keywords):
                 return 'analyst'
-                
-            # Check for image in context (handled by responder with vision tool)
-            if context.get('has_image', False) or 'image' in input_lower or 'photo' in input_lower:
-                return 'responder'  # Will use vision tool
-                
-            # Web search queries
+
+            # 4. Handle simple math as a direct task for the responder.
+            if self._is_math_query(input_lower):
+                return 'responder'
+
+            # 5. Check for general knowledge questions that DON'T need a web search.
+            # This comes after the research check to avoid incorrectly routing questions that need current info.
+            general_knowledge = ['who is', 'what is', 'when was', 'where is', 'how to', 'why is', 'what are']
+            if any(input_lower.startswith(phrase) for phrase in general_knowledge) and \
+               not any(word in input_lower for word in ['latest', 'today', 'yesterday']): # removed 'current' to help with typos
+                return 'responder'
+
+            # Web search queries (secondary check)
             search_keywords = ['search', 'find', 'look up', 'latest', 'current', 'news', 'update']
             question_words = ['who', 'what', 'when', 'where', 'why', 'how']
             
-            # If it's a question that might need current info
             is_question = any(input_lower.startswith(word) for word in question_words)
             needs_search = any(keyword in input_lower for keyword in search_keywords)
             
@@ -285,8 +257,8 @@ class AgentOrchestrator:
                 return 'creative_writer'
             
             # Check conversation context from memory if it's available
-            if mem and 'metadata' in mem and 'active_domain' in mem['metadata']:
-                return mem['metadata']['active_domain']
+            if memory and 'metadata' in memory and 'active_domain' in memory['metadata']:
+                return memory['metadata']['active_domain']
                 
             return None
             
@@ -792,60 +764,5 @@ class AgentOrchestrator:
         except Exception as e:
             logger.error(f"Error getting conversation history: {str(e)}", exc_info=True)
             return "Error: Could not load conversation history."
-    
-    async def _handle_image_analysis(
-        self,
-        user_input: str,
-        context: Dict[str, Any],
-        conversation_id: str,
-        user_id: str
-    ) -> Dict[str, Any]:
-        """Handle image analysis using the vision tool."""
-        try:
-            # Get the responder agent which has the vision tool
-            responder = self.base_agents['responder']
-            
-            # Prepare the input for the vision tool
-            image_url = context.get('image_url')
-            if not image_url and 'image_data' in context:
-                # If we have raw image data, we'd need to upload it somewhere first
-                # For now, we'll just use a placeholder
-                return {
-                    'success': False,
-                    'output': "Image upload from data is not yet supported. Please provide a URL.",
-                    'error': 'image_upload_not_supported'
-                }
-                
-            # Create the input for the vision tool
-            vision_input = {
-                'image_url': image_url,
-                'prompt': user_input or "What is in this image?"
-            }
-            
-            # Process with the vision tool
-            vision_response = await responder.process(
-                input_text=json.dumps(vision_input),
-                chat_history=await self._get_formatted_history(conversation_id, user_id)
-            )
-            
-            if not vision_response.get('success', False):
-                raise Exception(vision_response.get('error', 'Unknown error in vision tool'))
-                
-            return {
-                'success': True,
-                'output': vision_response.get('output', 'No description available'),
-                'metadata': {
-                    'tool_used': 'vision',
-                    'image_url': image_url
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in image analysis: {str(e)}", exc_info=True)
-            return {
-                'success': False,
-                'output': "I couldn't analyze the image. Please try again with a different image or description.",
-                'error': str(e)
-            }
 
 # ... (rest of the code remains the same)
