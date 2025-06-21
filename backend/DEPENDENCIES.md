@@ -1,76 +1,129 @@
-# Naarad AI Backend Dependencies
+# Naarad AI Assistant - Dependencies Guide
 
-This document outlines the dependency management and compatibility for the Naarad AI Backend.
+## 🎯 Overview
 
-## Overview
+This document provides comprehensive information about the dependencies used in the Naarad AI Assistant project, including installation, compatibility, and troubleshooting.
 
-The backend has been updated to use the latest compatible versions of all dependencies, with a focus on:
+## 📦 Core Dependencies
 
-- **LangChain Ecosystem**: Latest v0.1.x series with full compatibility
-- **FastAPI**: Latest v0.1.x series for modern web API development
-- **Pydantic**: v2.x for advanced data validation
-- **Python**: 3.8+ compatibility
-
-## Dependency Categories
-
-### Core Web Framework
-- **FastAPI** (≥0.110.0): Modern, fast web framework for building APIs
-- **Uvicorn** (≥0.27.0): Lightning-fast ASGI server
-- **Python-multipart** (≥0.0.6): File upload support
+### Web Framework
+- **FastAPI**: Modern, fast web framework for building APIs
+- **Uvicorn**: ASGI server for running FastAPI applications
+- **Python-multipart**: File upload support
 
 ### Rate Limiting
-- **SlowAPI** (≥0.1.9): Rate limiting for API endpoints
+- **SlowAPI**: Rate limiting middleware for FastAPI
 
-### Data Validation & Settings
-- **Pydantic** (≥2.11.0): Data validation using Python type annotations
-- **Pydantic-settings** (≥2.9.0): Settings management using Pydantic
-- **Pydantic-extra-types** (≥2.10.0): Additional Pydantic field types
+### Async and Networking
+- **AnyIO**: Async I/O library
+- **AIOHTTP**: Async HTTP client/server
+- **HTTPX**: Modern HTTP client
+
+### Data Validation and Settings
+- **Pydantic**: Data validation using Python type annotations
+- **Pydantic-settings**: Settings management using Pydantic
+- **Pydantic-extra-types**: Additional Pydantic field types
+
+### Environment and Configuration
+- **Python-dotenv**: Environment variable management
 
 ### LangChain Ecosystem
-- **LangChain** (≥0.1.20): Core LangChain framework
-- **LangChain-core** (≥0.3.65): Core LangChain components
-- **LangChain-community** (≥0.0.38): Community integrations
-- **LangChain-groq** (≥0.3.2): Groq integration
-- **LangChain-openai** (≥0.0.8): OpenAI integration
-- **LangChain-text-splitters** (≥0.0.2): Text splitting utilities
+- **LangChain**: Framework for developing applications with LLMs
+- **LangChain-core**: Core LangChain functionality
+- **LangChain-community**: Community integrations
+- **LangChain-groq**: Groq integration
+- **LangChain-openai**: OpenAI integration
+- **LangChain-text-splitters**: Text splitting utilities
+- **LangChain-hub**: Model and prompt hub
+- **LangChain-anthropic**: Anthropic integration
+- **LangChain-experimental**: Experimental features
+- **LangChain-google-genai**: Google Generative AI integration
+- **LangChain-fireworks**: Fireworks AI integration
+- **LangChain-mistralai**: Mistral AI integration
+- **LangChain-nomic**: Nomic integration
+- **LangChain-together**: Together AI integration
+- **LangChain-voyageai**: Voyage AI integration
+- **LangChain-pinecone**: Pinecone vector store integration
+- **LangChain-chroma**: Chroma vector store integration
+- **LangChain-elasticsearch**: Elasticsearch integration
+- **LangChain-qdrant**: Qdrant vector store integration
+- **LangChain-weaviate**: Weaviate vector store integration
+- **LangChain-astradb**: Astra DB integration
+- **LangChain-mongodb**: MongoDB integration
+- **LangChain-aws**: AWS integrations
+- **LangChain-upstage**: Upstage integration
+- **LangChain-zhipuai**: Zhipu AI integration
+- **LangChain-baidu-qianfan**: Baidu Qianfan integration
+- **LangChain-box**: Box integration
+- **LangChain-clarifai**: Clarifai integration
+- **LangChain-cohere**: Cohere integration
+- **LangChain-couchbase**: Couchbase integration
+- **LangChain-google-vertexai**: Google Vertex AI integration
+- **LangChain-ibm**: IBM integration
+- **LangChain-milvus**: Milvus integration
+- **LangChain-postgres**: PostgreSQL integration
+- **LangChain-robocorp**: Robocorp integration
+- **LangChain-exa**: Exa integration
+- **LangChain-google-community**: Google Community integrations
+- **LangChain-huggingface**: Hugging Face integration
+- **LangChain-ollama**: Ollama integration
+- **LangChain-nvidia-ai-endpoints**: NVIDIA AI Endpoints integration
+- **LangChain-yandex**: Yandex integration
+- **LangChain-redis**: Redis integration
+- **LangChain-community[graph_vector_stores]**: Graph vector stores
 
 ### LLM Providers
-- **Groq** (≥0.4.1): Groq API client
-- **OpenAI** (≥1.88.0): OpenAI API client
+- **Groq**: Fast LLM inference
+- **OpenAI**: OpenAI API integration
 
 ### AI/ML Libraries
-- **Sentence-transformers** (≥2.7.0): Sentence embeddings
-- **Transformers** (≥4.52.0): Hugging Face transformers
-- **Torch** (≥2.7.0): PyTorch deep learning framework
-- **NumPy** (≥1.26.0): Numerical computing
+- **Sentence-transformers**: Sentence embeddings
+- **Transformers**: Hugging Face transformers
+- **Torch**: PyTorch deep learning framework
+- **NumPy**: Numerical computing
 
-### Database (Optional)
-- **SQLAlchemy** (≥2.0.0): SQL toolkit and ORM
-- **Alembic** (≥1.12.0): Database migration tool
-- **Psycopg2-binary** (≥2.9.10): PostgreSQL adapter
+### Database
+- **SQLAlchemy**: SQL toolkit and ORM
+- **Alembic**: Database migration tool
+- **Psycopg2-binary**: PostgreSQL adapter
+- **Greenlet**: Lightweight coroutines
 
-### Authentication & Security
-- **Python-jose** (≥3.5.0): JavaScript Object Signing and Encryption
-- **Passlib** (≥1.7.4): Password hashing library
+### Authentication and Security
+- **Python-jose[cryptography]**: JWT implementation
+- **Passlib[bcrypt]**: Password hashing
 
-### Monitoring & Metrics
-- **Prometheus-client** (≥0.22.0): Prometheus metrics
+### Monitoring and Metrics
+- **Prometheus-client**: Prometheus metrics
+
+### HTTP Requests
+- **Requests**: HTTP library
 
 ### Testing
-- **Pytest** (≥8.4.0): Testing framework
-- **Pytest-asyncio** (≥1.0.0): Async testing support
-- **Pytest-cov** (≥6.2.0): Coverage reporting
-- **Pytest-mock** (≥3.14.0): Mocking support
+- **Pytest**: Testing framework
+- **Pytest-asyncio**: Async testing support
+- **Pytest-cov**: Coverage reporting
+- **Pytest-mock**: Mocking support
 
-### Development Tools
-- **Black** (≥23.0.0): Code formatter
-- **Isort** (≥6.0.0): Import sorter
-- **Flake8** (≥6.0.0): Linter
-- **MyPy** (≥1.16.0): Type checker
+### Code Quality and Development
+- **Black**: Code formatter
+- **Isort**: Import sorter
+- **Flake8**: Linter
+- **MyPy**: Type checker
 
-## Installation
+### Documentation
+- **MkDocs**: Documentation generator
+- **MkDocs-material**: Material theme for MkDocs
+- **Mkdocstrings**: Automatic API documentation
+- **Mkdocstrings-python**: Python support for mkdocstrings
 
-### Quick Start
+### Utilities
+- **Python-dateutil**: Date utilities
+- **Tenacity**: Retry library
+- **Tiktoken**: Tokenizer for OpenAI models
+
+## 🚀 Installation
+
+### Automated Installation
 
 1. **Navigate to backend directory:**
    ```bash
@@ -126,10 +179,10 @@ The backend includes a comprehensive compatibility layer (`agent/compat.py`) tha
 
 ## Testing Dependencies
 
-Run the dependency test script to verify all installations:
+To verify all installations, run the test suite:
 
 ```bash
-python test_dependencies.py
+pytest tests/ -v
 ```
 
 This will:
@@ -143,7 +196,7 @@ This will:
 
 1. **Check current versions:**
    ```bash
-   python test_dependencies.py
+   pip list
    ```
 
 2. **Update to latest compatible versions:**
@@ -153,7 +206,7 @@ This will:
 
 3. **Verify updates:**
    ```bash
-   python test_dependencies.py
+   pytest tests/ -v
    ```
 
 ### Pinning Specific Versions
@@ -241,7 +294,7 @@ langchain==0.1.20
 
 3. **Test compatibility:**
    ```bash
-   python test_dependencies.py
+   pytest tests/ -v
    ```
 
 4. **Run tests:**
@@ -260,7 +313,7 @@ langchain==0.1.20
 For dependency-related issues:
 
 1. Check the compatibility layer (`agent/compat.py`)
-2. Run the test script (`test_dependencies.py`)
+2. Run the test suite (`pytest tests/`)
 3. Review this documentation
 4. Check individual package documentation
 
@@ -270,6 +323,6 @@ When adding new dependencies:
 
 1. Add to appropriate requirements file
 2. Update compatibility layer if needed
-3. Add to test script
+3. Add to test suite
 4. Update this documentation
 5. Test with existing codebase 

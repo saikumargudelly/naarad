@@ -1,10 +1,10 @@
-# Naarad AI Assistant - Comprehensive Test Suite Summary
+# Naarad AI Assistant - Test Suite Summary
 
 ## 🎯 Overview
 
-I have analyzed your entire Naarad AI Assistant project and created a comprehensive test suite that covers all aspects of your backend system. This test suite ensures that your APIs are working correctly, configurations are properly set up, and all integrations are functioning as expected.
+This document provides an overview of the current test structure for the Naarad AI Assistant project. The test suite ensures that your APIs are working correctly, configurations are properly set up, and all integrations are functioning as expected.
 
-## 📁 Files Created
+## 📁 Current Test Structure
 
 ### 1. `env.example` - Environment Configuration Template
 **Purpose**: Complete environment configuration template with all required variables
@@ -16,54 +16,20 @@ I have analyzed your entire Naarad AI Assistant project and created a comprehens
 - Database settings
 - Logging and monitoring settings
 
-### 2. `test_comprehensive_suite.py` - Main API Test Suite
+### 2. `tests/` Directory - Main Test Suite
 **Purpose**: Comprehensive testing of all API endpoints and functionality
-**Test Categories**:
-- **Basic API Endpoints**: Root, health checks, chat endpoints
-- **Chat Functionality**: Basic chat, conversation context, chat history
-- **Input Validation**: Empty messages, long messages, invalid JSON, missing fields
-- **Query Types**: Factual questions, creative requests, code generation, math, translation
-- **External API Integration**: Brave Search, LLM providers
-- **Error Handling**: Server errors, timeouts, edge cases
-- **Performance**: Response times, concurrent requests
-- **Security**: CORS, SQL injection prevention, XSS prevention
-- **Agent Functionality**: Multi-agent collaboration, memory management
-- **Edge Cases**: Unicode, special characters, large chat histories
+**Test Files**:
+- `test_chat_api.py` - Chat API functionality tests
+- `test_comprehensive_api.py` - Comprehensive API testing
+- `test_agents.py` - Agent functionality tests
+- `test_domain_agents.py` - Domain-specific agent tests
+- `test_enhanced_router.py` - Router functionality tests
+- `test_agent_responses_v2.py` - Agent response validation
+- `test_langchain_messages.py` - LangChain message handling
+- `test_utils.py` - Utility function tests
+- `standalone_test.py` - Standalone functionality tests
 
-### 3. `test_configuration.py` - Configuration Validation
-**Purpose**: Validates all environment variables and configuration settings
-**Validation Areas**:
-- Environment file existence
-- Required API keys presence and format
-- Model configurations
-- Server settings
-- Security settings
-- Database configuration
-- Logging setup
-- File storage settings
-- Caching configuration
-- Monitoring setup
-
-### 4. `run_all_tests.py` - Master Test Runner
-**Purpose**: Orchestrates all test suites and provides comprehensive reporting
-**Features**:
-- Runs all test suites in correct order
-- Dependency checking
-- Server availability verification
-- Performance testing
-- Detailed reporting with success/failure rates
-- Command-line options for selective testing
-- Integration with existing test files
-
-### 5. `quick_test.py` - Quick Validation Script
-**Purpose**: Simple script for basic functionality validation
-**Tests**:
-- Server health check
-- Basic chat functionality
-- Configuration validation
-- API documentation accessibility
-
-### 6. `TESTING.md` - Comprehensive Testing Documentation
+### 3. `TESTING.md` - Testing Documentation
 **Purpose**: Complete guide for testing procedures and troubleshooting
 **Contents**:
 - Setup instructions
@@ -86,27 +52,15 @@ I have analyzed your entire Naarad AI Assistant project and created a comprehens
    uvicorn main:app --reload
    ```
 
-3. **Run quick test**:
+3. **Run tests with pytest**:
    ```bash
-   python quick_test.py
+   pytest tests/ -v
    ```
 
-4. **Run full test suite**:
+4. **Run specific test file**:
    ```bash
-   python run_all_tests.py
+   pytest tests/test_chat_api.py -v
    ```
-
-### Individual Test Suites
-```bash
-# Configuration tests only
-python run_all_tests.py --config-only
-
-# API tests only
-python run_all_tests.py --api-only
-
-# Skip server check
-python run_all_tests.py --skip-server-check
-```
 
 ## 🔍 What the Tests Cover
 
@@ -192,101 +146,36 @@ python run_all_tests.py --skip-server-check
 - Ensures security compliance
 
 ### 2. **Easy to Use**
-- Single command to run all tests
+- Standard pytest framework
 - Clear error messages and troubleshooting
-- Quick test option for basic validation
+- Quick test execution
 - Detailed reporting and summaries
 
 ### 3. **Production Ready**
+- Automated testing capabilities
+- Continuous integration support
 - Performance benchmarking
 - Security validation
-- Configuration management
-- Continuous integration support
 
-### 4. **Maintainable**
-- Well-documented test cases
-- Modular test structure
-- Easy to extend and modify
-- Clear naming conventions
-
-## 🔧 Customization
+## 🔧 Maintenance
 
 ### Adding New Tests
-1. Follow existing test structure
-2. Add to appropriate test suite
-3. Update documentation
-4. Include both positive and negative cases
+1. Create new test file in `tests/` directory
+2. Follow pytest naming conventions
+3. Add appropriate test cases
+4. Update this documentation if needed
 
-### Modifying Test Parameters
-- Adjust timeout values in test files
-- Modify expected response formats
-- Update API endpoint URLs
-- Change performance thresholds
-
-### Environment-Specific Testing
-- Use different API keys for testing
-- Configure test-specific settings
-- Mock external dependencies
-- Set up test databases
-
-## 📈 Performance Benchmarks
-
-### Expected Performance
-- **Response Time**: < 30 seconds for complex queries
-- **Concurrent Requests**: 5+ simultaneous requests
-- **Memory Usage**: < 500MB for typical usage
-- **CPU Usage**: < 80% under normal load
-
-### Load Testing
-For production deployment, consider additional load testing with tools like Locust or Apache Bench.
-
-## 🤝 Integration with CI/CD
-
-### GitHub Actions Example
-```yaml
-name: Test Naarad AI Assistant
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.9
-    - name: Install dependencies
-      run: |
-        cd backend
-        pip install -r requirements.txt
-    - name: Run tests
-      run: |
-        cd backend
-        python run_all_tests.py --skip-server-check
-      env:
-        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-```
-
-## 📞 Support and Maintenance
-
-### Regular Testing
-- Run tests before each deployment
-- Monitor performance metrics
-- Update test cases as features evolve
-- Validate configuration changes
+### Updating Tests
+1. Modify existing test files as needed
+2. Ensure all tests pass
+3. Update documentation for any changes
+4. Run full test suite to verify
 
 ### Troubleshooting
-1. Check server logs for errors
-2. Verify API keys are valid
-3. Test endpoints manually
-4. Review configuration settings
-
-### Updates
-- Keep test suite updated with new features
-- Add tests for new API endpoints
-- Update performance benchmarks
-- Maintain security test coverage
+- Check `.env` configuration
+- Verify API keys are valid
+- Ensure server is running
+- Review test logs for specific errors
 
 ---
 

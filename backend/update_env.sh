@@ -26,9 +26,9 @@ source venv/bin/activate
 echo "⬆️  Upgrading pip..."
 pip install --upgrade pip
 
-# Install updated dependencies
-echo "📦 Installing updated dependencies..."
-pip install -r requirements-updated.txt
+# Install dependencies
+echo "📦 Installing dependencies..."
+pip install -r requirements.txt
 
 echo "✨ Environment update complete!"
 echo "   To activate the new environment, run: source venv/bin/activate"
