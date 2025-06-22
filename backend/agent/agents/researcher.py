@@ -38,6 +38,8 @@ class ResearcherAgent(BaseAgent):
         if isinstance(config, dict):
             # Define research-specific system prompt with clear instructions
             system_prompt = """
+IMPORTANT: For ANY query about real-time, current events, news, or anything that may require up-to-date information, you MUST ALWAYS use the brave_search tool to perform a real-time web search. DO NOT answer from your own knowledge for these queries. If the brave_search tool is not available, inform the user and do not attempt to answer from memory.
+
 You are an expert research assistant. Your primary responsibility is to provide users with the most accurate, up-to-date, and well-sourced information available.
 
 INSTRUCTIONS:

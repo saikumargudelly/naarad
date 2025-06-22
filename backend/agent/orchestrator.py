@@ -616,103 +616,98 @@ class AgentOrchestrator:
         }
         
         # Special handling for specific agent types
-        if agent_name == 'researcher':
-            context['search_performed'] = True
-            context['max_iterations'] = min(context.get('max_iterations', 8), 10)
-            logger.debug("[Orchestrator] Enabled search for researcher agent")
+        # --- Always use Brave Search for real-time queries ---
+        force_realtime = self._is_realtime_query(user_input) or self._should_force_realtime(user_input)
+        if force_realtime:
+            brave_tool = BraveSearchTool()
+            # --- Use context to augment Brave query for follow-ups ---
+            query = self._build_contextual_query(user_input, context)
+            if not any(kw in query.lower() for kw in ['today', 'live', 'current', 'now']):
+                query += ' today'
+            brave_result = await brave_tool._arun(query)
+            if isinstance(brave_result, dict) and 'error' not in brave_result:
+                web_results = brave_result.get('web', {}).get('results', [])
+                # Sort/filter by date if possible
+                dated_results = []
+                for item in web_results:
+                    # Try to extract date from snippet, title, or url
+                    date_candidates = [item.get('description', ''), item.get('title', ''), item.get('url', '')]
+                    item_date = None
+                    for candidate in date_candidates:
+                        d = self._extract_date(candidate)
+                        if d:
+                            item_date = d
+                            break
+                    if item_date:
+                        dated_results.append((item_date, item))
+                # If we found any dated results, sort by date (descending)
+                if dated_results:
+                    dated_results.sort(reverse=True, key=lambda x: x[0])
+                    web_results = [item for _, item in dated_results]
+                # Try to find today's result
+                today = datetime.datetime.now().date()
+                top = None
+                for item in web_results:
+                    for candidate in [item.get('description', ''), item.get('title', ''), item.get('url', '')]:
+                        d = self._extract_date(candidate)
+                        if d and d.date() == today:
+                            top = item
+                            break
+                    if top:
+                        break
+                # If no 'today' result, offer most recent and inform user
+                if not top and web_results:
+                    top = web_results[0]
+                    # Find date for most recent
+                    most_recent_date = None
+                    for candidate in [top.get('description', ''), top.get('title', ''), top.get('url', '')]:
+                        d = self._extract_date(candidate)
+                        if d:
+                            most_recent_date = d.date()
+                            break
+                    date_str = f" (most recent: {most_recent_date})" if most_recent_date else " (most recent)"
+                    output = f"No results found for today. Showing the most recent result{date_str}:\n\n**{top.get('title', 'Result')}**\n{top.get('description', '')}\n{top.get('url', '')}"
+                elif top:
+                    output = f"**{top.get('title', 'Result')}**\n{top.get('description', '')}\n{top.get('url', '')}"
+                else:
+                    output = "No relevant results found from Brave Search."
+                # Contextual follow-up logic
+                followup = ""
+                if len(web_results) > 1:
+                    q = user_input.lower()
+                    titles = ' '.join([r.get('title', '').lower() for r in web_results[:5]])
+                    followup_options = []
+                    if any(x in q or x in titles for x in ['women', "women's"]):
+                        followup_options.append("Do you want Women's or Men's match?")
+                    elif 'men' in q or "men's" in titles:
+                        followup_options.append("Do you want Men's or Women's match?")
+                    if 'highlight' in q or 'highlight' in titles:
+                        followup_options.append("Are you looking for highlights or live scorecard?")
+                    if 'score' in q or 'live' in q or 'scorecard' in titles:
+                        followup_options.append("Do you want the live score, full scorecard, or match summary?")
+                    if not followup_options:
+                        followup_options.append("Can you specify if you want news, scores, weather, or something else? Or would you like to see more results?")
+                    followup = '\n\n' + ' '.join(followup_options)
+                # CLEANING STEP: Remove duplicate words/phrases from both output and followup
+                output = self._remove_duplicate_words(output)
+                followup = self._remove_duplicate_words(followup)
+                output += followup
+                return {
+                    'success': True,
+                    'output': output,
+                    'agent_used': 'brave_search',
+                    'metadata': {'tool_used': 'brave_search', 'raw_result': brave_result, 'num_results': len(web_results)}
+                }
+            else:
+                error_msg = brave_result.get('error', 'Unknown error from Brave Search.') if isinstance(brave_result, dict) else str(brave_result)
+                return {
+                    'success': False,
+                    'output': f"Brave Search error: {error_msg}",
+                    'agent_used': 'brave_search',
+                    'metadata': {'tool_used': 'brave_search', 'error': error_msg}
+                }
         
         try:
-            # Refine BraveSearchTool query for real-time requests
-            force_realtime = self._is_realtime_query(user_input) or self._should_force_realtime(user_input)
-            if force_realtime:
-                brave_tool = BraveSearchTool()
-                # --- Use context to augment Brave query for follow-ups ---
-                query = self._build_contextual_query(user_input, context)
-                if not any(kw in query.lower() for kw in ['today', 'live', 'current', 'now']):
-                    query += ' today'
-                brave_result = await brave_tool._arun(query)
-                if isinstance(brave_result, dict) and 'error' not in brave_result:
-                    web_results = brave_result.get('web', {}).get('results', [])
-                    # Sort/filter by date if possible
-                    dated_results = []
-                    for item in web_results:
-                        # Try to extract date from snippet, title, or url
-                        date_candidates = [item.get('description', ''), item.get('title', ''), item.get('url', '')]
-                        item_date = None
-                        for candidate in date_candidates:
-                            d = self._extract_date(candidate)
-                            if d:
-                                item_date = d
-                                break
-                        if item_date:
-                            dated_results.append((item_date, item))
-                    # If we found any dated results, sort by date (descending)
-                    if dated_results:
-                        dated_results.sort(reverse=True, key=lambda x: x[0])
-                        web_results = [item for _, item in dated_results]
-                    # Try to find today's result
-                    today = datetime.datetime.now().date()
-                    top = None
-                    for item in web_results:
-                        for candidate in [item.get('description', ''), item.get('title', ''), item.get('url', '')]:
-                            d = self._extract_date(candidate)
-                            if d and d.date() == today:
-                                top = item
-                                break
-                        if top:
-                            break
-                    # If no 'today' result, offer most recent and inform user
-                    if not top and web_results:
-                        top = web_results[0]
-                        # Find date for most recent
-                        most_recent_date = None
-                        for candidate in [top.get('description', ''), top.get('title', ''), top.get('url', '')]:
-                            d = self._extract_date(candidate)
-                            if d:
-                                most_recent_date = d.date()
-                                break
-                        date_str = f" (most recent: {most_recent_date})" if most_recent_date else " (most recent)"
-                        output = f"No results found for today. Showing the most recent result{date_str}:\n\n**{top.get('title', 'Result')}**\n{top.get('description', '')}\n{top.get('url', '')}"
-                    elif top:
-                        output = f"**{top.get('title', 'Result')}**\n{top.get('description', '')}\n{top.get('url', '')}"
-                    else:
-                        output = "No relevant results found from Brave Search."
-                    # Contextual follow-up logic
-                    followup = ""
-                    if len(web_results) > 1:
-                        q = user_input.lower()
-                        titles = ' '.join([r.get('title', '').lower() for r in web_results[:5]])
-                        followup_options = []
-                        if any(x in q or x in titles for x in ['women', "women's"]):
-                            followup_options.append("Do you want Women's or Men's match?")
-                        elif 'men' in q or "men's" in titles:
-                            followup_options.append("Do you want Men's or Women's match?")
-                        if 'highlight' in q or 'highlight' in titles:
-                            followup_options.append("Are you looking for highlights or live scorecard?")
-                        if 'score' in q or 'live' in q or 'scorecard' in titles:
-                            followup_options.append("Do you want the live score, full scorecard, or match summary?")
-                        if not followup_options:
-                            followup_options.append("Can you specify if you want news, scores, weather, or something else? Or would you like to see more results?")
-                        followup = '\n\n' + ' '.join(followup_options)
-                    # CLEANING STEP: Remove duplicate words/phrases from both output and followup
-                    output = self._remove_duplicate_words(output)
-                    followup = self._remove_duplicate_words(followup)
-                    output += followup
-                    return {
-                        'success': True,
-                        'output': output,
-                        'agent_used': 'brave_search',
-                        'metadata': {'tool_used': 'brave_search', 'raw_result': brave_result, 'num_results': len(web_results)}
-                    }
-                else:
-                    error_msg = brave_result.get('error', 'Unknown error from Brave Search.') if isinstance(brave_result, dict) else str(brave_result)
-                    return {
-                        'success': False,
-                        'output': f"Brave Search error: {error_msg}",
-                        'agent_used': 'brave_search',
-                        'metadata': {'tool_used': 'brave_search', 'error': error_msg}
-                    }
-            
             # Try the primary agent first
             if agent_name in self.domain_agents:
                 logger.debug(f"[Orchestrator] Using domain agent: {agent_name}")
