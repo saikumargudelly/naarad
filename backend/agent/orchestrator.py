@@ -37,18 +37,23 @@ def _get_domain_agents():
 logger = logging.getLogger(__name__)
 
 class AgentOrchestrator:
-    def __init__(self, base_agents: Dict[str, AgentExecutor] = None):
+    def __init__(self, base_agents: Dict[str, AgentExecutor] = None, metrics=None, router=None):
         """Initialize the orchestrator with base agents and domain agents.
         
         Args:
             base_agents: Optional dictionary of base agents. If not provided,
                        an empty dict will be used.
+            metrics: Optional metrics collector for testability/monitoring.
+            router: Optional intent router for testability.
         """
         self.base_agents = base_agents or {}
         self.domain_agents = _get_domain_agents()
         self.conversation_history = []
         self.current_topic = None
         self.last_interaction_time = datetime.datetime.utcnow()
+        self.metrics = metrics  # For testability/monitoring
+        self.router = router    # For testability
+        # self.health_status = 'ok'  # For health endpoint
     
     async def process_query(
         self, 
@@ -105,22 +110,91 @@ class AgentOrchestrator:
                 if v:
                     context['metadata']['entities'][k] = v
             
+            # --- Intent classification (unified) ---
+            from .enhanced_router import EnhancedRouter
+            router = self.router or EnhancedRouter()
+            intent_match = await router.classify_intent(user_input, context)
+            intent = intent_match.intent.value if hasattr(intent_match.intent, 'value') else str(intent_match.intent)
+            confidence = intent_match.confidence
+            entities = {k: v.value for k, v in intent_match.entities.items()}
+            # Standardize context keys
+            context['routing_info'] = {
+                'intent': intent,
+                'confidence': confidence,
+                'entities': entities,
+                'raw_intent_match': intent_match
+            }
+            context['entities'] = entities
+            # Add context trace (breadcrumbs)
+            trace = context.get('trace', [])
+            trace.append({
+                'step': 'intent_classification',
+                'intent': intent,
+                'confidence': confidence,
+                'entities': entities,
+                'timestamp': datetime.datetime.utcnow().isoformat()
+            })
+            context['trace'] = trace
+            # --- Metrics: intent distribution, ambiguous queries, etc. ---
+            if self.metrics:
+                self.metrics.record_intent(intent, confidence)
+                if confidence < 0.6:
+                    self.metrics.record_ambiguous_query(user_input, intent, confidence)
+            # Log low-confidence queries for review
+            if confidence < 0.6:
+                logger.warning(f"Low-confidence intent: '{intent}' ({confidence:.2f}) for input: {user_input}")
+                # Escalate to responder with special prompt
+                clarification = f"I'm not sure what you're asking. Could you clarify your request? (Detected intent: {intent}, confidence: {confidence:.2f})"
+                context['trace'].append({'step': 'clarification', 'agent': 'responder', 'timestamp': datetime.datetime.utcnow().isoformat()})
+                if self.metrics:
+                    self.metrics.record_fallback('clarification')
+                # Call responder agent with special prompt
+                if 'responder' in self.base_agents:
+                    agent = self.base_agents['responder']
+                    response = await agent.process(
+                        input_text=clarification,
+                        context=context,
+                        conversation_id=conversation_id,
+                        user_id=user_id
+                    )
+                    return {
+                        'success': False,
+                        'output': response.get('output', clarification),
+                        'agent_used': 'responder',
+                        'metadata': {
+                            'processing_time_seconds': 0,
+                            'intent': intent,
+                            'confidence': confidence,
+                            'entities': entities,
+                            'trace': context['trace']
+                        }
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'output': clarification,
+                        'agent_used': None,
+                        'metadata': {
+                            'processing_time_seconds': 0,
+                            'intent': intent,
+                            'confidence': confidence,
+                            'entities': entities,
+                            'trace': context['trace']
+                        }
+                    }
+            
             # 1. Analyze context and determine the best agent(s) to handle the query
-            agent_decision = await self._select_agent(
-                user_input=user_input,
-                context=context,
-                conversation_id=conversation_id,
-                user_id=user_id
-            )
+            agent_name = await self._select_agent_by_intent(intent, context)
+            context['trace'].append({'step': 'agent_selection', 'agent': agent_name, 'timestamp': datetime.datetime.utcnow().isoformat()})
             
             # 2. Process with the selected agent(s)
             response = await self._route_to_agent(
-                agent_name=agent_decision['primary_agent'],
+                agent_name=agent_name,
                 user_input=user_input,
                 context=context,
                 conversation_id=conversation_id,
                 user_id=user_id,
-                supporting_agents=agent_decision.get('supporting_agents', [])
+                supporting_agents=[]
             )
             
             # 3. Update conversation history with the response
@@ -134,18 +208,25 @@ class AgentOrchestrator:
             # 4. Update metrics
             processing_time = (datetime.datetime.utcnow() - start_time).total_seconds()
             agent_monitor.record_processing_time(
-                agent_name=agent_decision['primary_agent'],
+                agent_name=agent_name,
                 processing_time=processing_time,
                 conversation_id=conversation_id
             )
             
+            # --- Metrics: agent success/fallback ---
+            if self.metrics:
+                self.metrics.record_agent_result(agent_name, response.get('success', False))
+            
             return {
-                'success': True,
-                'output': response['output'],
-                'agent_used': agent_decision['primary_agent'],
+                'success': response.get('success', True),
+                'output': response.get('output', ''),
+                'agent_used': agent_name,
                 'metadata': {
                     'processing_time_seconds': processing_time,
-                    'supporting_agents': agent_decision.get('supporting_agents', [])
+                    'intent': intent,
+                    'confidence': confidence,
+                    'entities': entities,
+                    'trace': context['trace']
                 }
             }
             
@@ -223,174 +304,57 @@ class AgentOrchestrator:
                 "conversation_id": conversation_id
             }
     
-    async def _select_agent(
-        self, 
-        user_input: str,
-        context: Dict[str, Any],
-        conversation_id: str,
-        user_id: str
-    ) -> Dict[str, Any]:
-        """Determine which agent(s) should handle the query.
-        
-        Args:
-            user_input: The user's input text
-            context: Additional context including any files or metadata
-            conversation_id: ID of the current conversation
-            user_id: ID of the current user
-            
-        Returns:
-            Dict containing the primary agent and any supporting agents
-        """
-        try:
-            # Get conversation context asynchronously
-            memory_coro = memory_manager.get_conversation(conversation_id, user_id)
-            memory = await memory_coro if hasattr(memory_coro, '__await__') else memory_coro or {}
-            
-            # Check for domain-specific intents
-            domain_agent = await self._identify_domain(user_input, context, memory)
-            
-            if domain_agent:
-                return {
-                    'primary_agent': domain_agent,
-                    'supporting_agents': []
-                }
-            
-            # Default to general response agent
-            return {
-                'primary_agent': 'responder',
-                'supporting_agents': []
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in _select_agent: {str(e)}", exc_info=True)
-            # Fallback to responder agent on error
-            return {
-                'primary_agent': 'responder',
-                'supporting_agents': []
-            }
-    
-    async def _identify_domain(
-        self, 
-        user_input: str, 
-        context: Dict[str, Any],
-        memory: Dict[str, Any]
-    ) -> Optional[str]:
-        """Identify the appropriate domain agent for the query.
-        
-        Args:
-            user_input: The user's input text
-            context: Additional context including any files or metadata
-            memory: Conversation memory and context
-            
-        Returns:
-            Optional[str]: The name of the domain agent to use, or None for default
-        """
-        try:
-            # Use enhanced router for intent classification
-            from .enhanced_router import EnhancedRouter
-            router = EnhancedRouter()
-            
-            # Classify intent
-            intent_match = await router.classify_intent(user_input, context)
-            intent = intent_match.intent
-            
-            # Map intents to domain agents
-            intent_to_agent = {
-                'task_manager': ['reminder', 'calendar', 'task'],
-                'creative_writer': ['creative_writing', 'story', 'narrative'],
-                'analyst': ['analysis', 'research', 'investigation'],
-                'context_manager': ['conversation', 'context', 'follow_up'],
-                'emotion_agent': ['emotion', 'feeling', 'mood', 'empathy'],
-                'creativity_agent': ['creativity', 'brainstorm', 'ideas', 'innovation'],
-                'prediction_agent': ['prediction', 'forecast', 'trend', 'pattern'],
-                'learning_agent': ['learning', 'improve', 'adapt', 'feedback'],
-                'quantum_agent': ['quantum', 'superposition', 'entanglement', 'quantum_computing'],
-                'search': ['researcher']
-            }
-            
-            # Check for specific domain keywords
-            user_input_lower = user_input.lower()
-            
-            # Search and research requests
-            if any(word in user_input_lower for word in ['search', 'find', 'look up', 'google', 'research', 'investigate', 'what is', 'who is', 'where is', 'when is', 'how to']):
-                return 'researcher'
-            
-            # Emotion detection
-            if any(word in user_input_lower for word in ['feel', 'emotion', 'mood', 'sad', 'happy', 'angry', 'worried', 'excited', 'frustrated']):
-                return 'emotion_agent'
-            
-            # Creativity requests
-            if any(word in user_input_lower for word in ['creative', 'brainstorm', 'ideas', 'innovative', 'story', 'narrative', 'inspiration']):
-                return 'creativity_agent'
-            
-            # Prediction requests
-            if any(word in user_input_lower for word in ['predict', 'forecast', 'future', 'trend', 'pattern', 'what will happen', 'outcome']):
-                return 'prediction_agent'
-            
-            # Learning requests
-            if any(word in user_input_lower for word in ['learn', 'improve', 'adapt', 'feedback', 'better', 'optimize', 'enhance']):
-                return 'learning_agent'
-            
-            # Quantum requests
-            if any(word in user_input_lower for word in ['quantum', 'superposition', 'entanglement', 'tunneling', 'quantum computing', 'qubit']):
-                return 'quantum_agent'
-            
-            # Task management
-            if any(word in user_input_lower for word in ['remind', 'task', 'todo', 'schedule', 'appointment', 'meeting']):
-                return 'task_manager'
-            
-            # Creative writing
-            if any(word in user_input_lower for word in ['write', 'story', 'creative', 'narrative', 'character', 'plot']):
-                return 'creative_writer'
-            
-            # Analysis
-            if any(word in user_input_lower for word in ['analyze', 'research', 'investigate', 'examine', 'study']):
-                return 'analyst'
-            
-            # Context management
-            if any(word in user_input_lower for word in ['remember', 'context', 'previous', 'earlier', 'conversation']):
-                return 'context_manager'
-            
-            # Check intent match from enhanced router
-            if intent and hasattr(intent, 'value'):
-                intent_value = intent.value
-                
-                # Map intent values to agents
-                if intent_value in ['emotion']:
-                    return 'emotion_agent'
-                elif intent_value in ['creativity']:
-                    return 'creativity_agent'
-                elif intent_value in ['prediction']:
-                    return 'prediction_agent'
-                elif intent_value in ['learning']:
-                    return 'learning_agent'
-                elif intent_value in ['quantum']:
-                    return 'quantum_agent'
-                elif intent_value in ['search']:
-                    return 'researcher'
-                elif intent_value in ['reminder', 'calendar']:
-                    return 'task_manager'
-                elif intent_value in ['creative_writing']:
-                    return 'creative_writer'
-                elif intent_value in ['analysis']:
-                    return 'analyst'
-                elif intent_value in ['context']:
-                    return 'context_manager'
-            
-            # Check conversation history for context
-            if memory and 'messages' in memory:
-                recent_messages = memory['messages'][-5:]  # Last 5 messages
-                for message in recent_messages:
-                    if 'agent_used' in message:
-                        # Continue with the same agent if it was working well
-                        return message['agent_used']
-            
-            # Default to context manager for general conversation
-            return 'context_manager'
-            
-        except Exception as e:
-            logger.error(f"Error in domain identification: {str(e)}", exc_info=True)
-            return 'context_manager'  # Safe fallback
+    async def _select_agent_by_intent(self, intent: str, context: Dict[str, Any]) -> str:
+        """Select agent based only on intent, fallback to keyword checks if needed."""
+        # Map intent to agent
+        intent_to_agent = {
+            'reminder': 'task_manager',
+            'calendar': 'task_manager',
+            'task': 'task_manager',
+            'creative_writing': 'creative_writer',
+            'story': 'creative_writer',
+            'narrative': 'creative_writer',
+            'analysis': 'analyst',
+            'research': 'researcher',
+            'investigation': 'analyst',
+            'conversation': 'context_manager',
+            'context': 'context_manager',
+            'follow_up': 'context_manager',
+            'emotion': 'emotion_agent',
+            'feeling': 'emotion_agent',
+            'mood': 'emotion_agent',
+            'empathy': 'emotion_agent',
+            'creativity': 'creativity_agent',
+            'brainstorm': 'creativity_agent',
+            'ideas': 'creativity_agent',
+            'innovation': 'creativity_agent',
+            'prediction': 'prediction_agent',
+            'forecast': 'prediction_agent',
+            'trend': 'prediction_agent',
+            'pattern': 'prediction_agent',
+            'learning': 'learning_agent',
+            'improve': 'learning_agent',
+            'adapt': 'learning_agent',
+            'feedback': 'learning_agent',
+            'quantum': 'quantum_agent',
+            'superposition': 'quantum_agent',
+            'entanglement': 'quantum_agent',
+            'quantum_computing': 'quantum_agent',
+            'search': 'researcher',
+            'general': 'responder',
+            'greeting': 'responder',
+            'unknown': 'responder',
+        }
+        agent_name = intent_to_agent.get(intent, None)
+        if agent_name:
+            return agent_name
+        # Fallback: keyword checks (legacy)
+        user_input_lower = context.get('input_text', '').lower() if 'input_text' in context else ''
+        if any(word in user_input_lower for word in ['search', 'find', 'look up', 'google', 'research', 'investigate', 'what is', 'who is', 'where is', 'when is', 'how to']):
+            return 'researcher'
+        if any(word in user_input_lower for word in ['analyze', 'investigate', 'examine', 'study']):
+            return 'analyst'
+        return 'responder'
     
     def _is_realtime_query(self, user_input: str) -> bool:
         """Detect if the query is about real-time/current information (news, weather, scores, finance, live events, etc.)."""

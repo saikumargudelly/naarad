@@ -34,13 +34,16 @@ class AnalystAgent(BaseAgent):
             raise ValueError("config must be an AgentConfig instance or a dictionary")
             
         if isinstance(config, dict):
-            # Set default values if not provided
-            default_config = {
-                'name': 'analyst',
-                'description': 'Specialized in analyzing information and providing insights.',
-                'model_name': settings.REASONING_MODEL,
-                'temperature': 0.5,
-                'system_prompt': """
+            # Accept routing_info from context if present
+            routing_info = config.get('routing_info', {})
+            intent = routing_info.get('intent', 'unknown')
+            confidence = routing_info.get('confidence', None)
+            entities = routing_info.get('entities', {})
+            # Format routing info for prompt
+            routing_str = f"\n[Routing Info]\nIntent: {intent} (confidence: {confidence})\nEntities: {entities}\n" if intent != 'unknown' else ''
+            # Enhanced system prompt
+            system_prompt = f"""
+{routing_str}
 You are an expert analytical assistant. Your responsibilities are:
 
 1. Thoroughly analyze the provided information, breaking down complex data into clear, actionable insights.
@@ -52,14 +55,20 @@ You are an expert analytical assistant. Your responsibilities are:
 7. For ambiguous or broad queries, ask clarifying questions before proceeding with analysis.
 8. Never fabricate data or analysis; be transparent about any limitations or uncertainties.
 
-Be objective, thorough, and ensure your analysis is actionable and easy to understand.
-""",
-                'max_iterations': 5
-            }
+If the query is outside your analytical domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
+"""
             
             # If no tools are provided, use a dummy tool
             if 'tools' not in config or not config['tools']:
                 from ..tools.dummy_tool import DummyTool
+                default_config = {
+                    'name': 'analyst',
+                    'description': 'Specialized in analyzing information and providing insights.',
+                    'model_name': settings.REASONING_MODEL,
+                    'temperature': 0.5,
+                    'system_prompt': system_prompt,
+                    'max_iterations': 5
+                }
                 default_config['tools'] = [DummyTool()]
             
             # Update with any provided config values

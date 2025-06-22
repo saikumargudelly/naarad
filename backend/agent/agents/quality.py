@@ -26,12 +26,13 @@ class QualityAgent(BaseAgent):
             config: The configuration for the agent. Must be a dictionary.
         """
         # Set default values if not provided
-        default_config = {
-            'name': 'quality',
-            'description': 'Specialized in refining and improving responses for quality and clarity.',
-            'model_name': settings.REASONING_MODEL,
-            'temperature': 0.3,  # Lower temperature for more consistent, focused outputs
-            'system_prompt': """
+        routing_info = config.get('routing_info', {}) if isinstance(config, dict) else {}
+        intent = routing_info.get('intent', 'unknown')
+        confidence = routing_info.get('confidence', None)
+        entities = routing_info.get('entities', {})
+        routing_str = f"\n[Routing Info]\nIntent: {intent} (confidence: {confidence})\nEntities: {entities}\n" if intent != 'unknown' else ''
+        system_prompt = f"""
+{routing_str}
 You are a quality assurance specialist. Your responsibilities are:
 
 1. Review and improve responses for clarity, conciseness, accuracy, tone, and professionalism.
@@ -43,7 +44,16 @@ You are a quality assurance specialist. Your responsibilities are:
 7. Always be transparent about any limitations or uncertainties in the improved response.
 
 Be objective, constructive, and ensure every response is actionable and easy to understand.
-""", 'max_iterations': 2  # Fewer iterations for quality checking
+
+If the query is outside your quality domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
+"""
+        default_config = {
+            'name': 'quality',
+            'description': 'Specialized in refining and improving responses for quality and clarity.',
+            'model_name': settings.REASONING_MODEL,
+            'temperature': 0.3,  # Lower temperature for more consistent, focused outputs
+            'system_prompt': system_prompt,
+            'max_iterations': 2  # Fewer iterations for quality checking
         }
         # Update with any provided config values
         default_config.update(config)

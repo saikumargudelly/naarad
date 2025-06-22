@@ -36,8 +36,13 @@ class ResearcherAgent(BaseAgent):
             raise ValueError("config must be an AgentConfig instance or a dictionary")
             
         if isinstance(config, dict):
-            # Define research-specific system prompt with clear instructions
-            system_prompt = """
+            routing_info = config.get('routing_info', {})
+            intent = routing_info.get('intent', 'unknown')
+            confidence = routing_info.get('confidence', None)
+            entities = routing_info.get('entities', {})
+            routing_str = f"\n[Routing Info]\nIntent: {intent} (confidence: {confidence})\nEntities: {entities}\n" if intent != 'unknown' else ''
+            system_prompt = f"""
+{routing_str}
 IMPORTANT: For ANY query about real-time, current events, news, or anything that may require up-to-date information, you MUST ALWAYS use the brave_search tool to perform a real-time web search. DO NOT answer from your own knowledge for these queries. If the brave_search tool is not available, inform the user and do not attempt to answer from memory.
 
 You are an expert research assistant. Your primary responsibility is to provide users with the most accurate, up-to-date, and well-sourced information available.
@@ -68,7 +73,10 @@ INSTRUCTIONS:
 
 5. NEVER fabricate or guess recent information. If you cannot find a reliable, up-to-date answer, say so clearly.
 
-Be thorough, objective, and always cite your sources. For all queries about current events, news, or reports, the user expects a real-time web search and cited sources."""
+Be thorough, objective, and always cite your sources. For all queries about current events, news, or reports, the user expects a real-time web search and cited sources.
+
+If the query is outside your research domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
+"""
             
             # Set default values if not provided
             default_config = {

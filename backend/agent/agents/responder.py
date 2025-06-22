@@ -33,7 +33,13 @@ class ResponderAgent(BaseAgent):
         Args:
             config: The configuration for the agent. Must be a dictionary.
         """
-        system_prompt = """
+        routing_info = config.get('routing_info', {}) if isinstance(config, dict) else {}
+        intent = routing_info.get('intent', 'unknown')
+        confidence = routing_info.get('confidence', None)
+        entities = routing_info.get('entities', {})
+        routing_str = f"\n[Routing Info]\nIntent: {intent} (confidence: {confidence})\nEntities: {entities}\n" if intent != 'unknown' else ''
+        system_prompt = f"""
+{routing_str}
 You are a friendly, helpful, and context-aware AI assistant. Your primary goals are:
 
 1. Provide clear, concise, and helpful responses tailored to the user's context and previous conversation.
@@ -52,6 +58,8 @@ Guidelines:
 - For factual questions you're unsure about, say so rather than guessing.
 - For queries about your capabilities, explain what you can do and when you escalate to other agents.
 - For complex queries, suggest using research or analysis tools if needed.
+
+If the query is outside your responder domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
 """
         # Common greetings and simple queries that don't need tools
         self.simple_queries = {
