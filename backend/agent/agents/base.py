@@ -29,22 +29,15 @@ logger = logging.getLogger(__name__)
 AgentT = TypeVar('AgentT', bound='BaseAgent')
 
 class AgentConfig(BaseModel):
-    """Configuration for an agent.
-    
-    Models are configured to use Groq with the following mapping:
-    - Language Reasoning: mixtral-8x7b-instruct-v0.1
-    - Chat: mixtral-8x7b-instruct-v0.1
-    - Default: mixtral-8x7b-instruct-v0.1
-    """
+    """Configuration for an agent (Pydantic v2 only, no custom post-init)."""
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra='forbid',
         validate_assignment=True
     )
-    
     name: str = Field(..., description="Unique identifier for the agent")
     description: str = Field(..., description="Brief description of the agent's purpose")
-    model_name: str = Field("mixtral-8x7b-instruct-v0.1", description="Name of the model to use")
+    model_name: str = Field("llama3-70b-8192", description="Name of the model to use")
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Sampling temperature for model generation")
     system_prompt: str = Field("", description="Initial system prompt for the agent")
     tools: List[BaseTool] = Field(default_factory=list, description="List of tools available to the agent")
@@ -52,19 +45,6 @@ class AgentConfig(BaseModel):
     verbose: bool = Field(True, description="Enable verbose logging")
     handle_parsing_errors: bool = Field(True, description="Whether to handle parsing errors gracefully")
     early_stopping_method: str = Field("force", description="Method to use for early stopping")
-    
-    def model_post_init(self, __context):
-        """Post-init processing for Pydantic v2 compatibility."""
-        # Convert tools to list if they're not already
-        if not isinstance(self.tools, list):
-            self.tools = [self.tools] if self.tools else []
-            
-        # Ensure all tools are instances of BaseTool
-        self.tools = [
-            tool if isinstance(tool, BaseTool) else BaseTool(**tool) 
-            if isinstance(tool, dict) else tool
-            for tool in self.tools
-        ]
 
 class BaseAgent:
     """Base class for all agents.
@@ -73,22 +53,21 @@ class BaseAgent:
     It handles the creation and management of the underlying LangChain agent.
     """
     
-    def __init__(self, config: Union[AgentConfig, Dict[str, Any]]):
+    def __init__(self, config: Dict[str, Any]):
         """Initialize the agent with configuration.
         
         Args:
-            config: The configuration for the agent. Can be a dictionary or AgentConfig instance.
+            config: The configuration for the agent. Must be a dictionary.
             
         Raises:
             ValueError: If the configuration is invalid
         """
         try:
-            if not isinstance(config, AgentConfig):
-                config = AgentConfig(**config) if isinstance(config, dict) else AgentConfig.model_validate(config)
-                
-            self.config = config
+            if not isinstance(config, dict):
+                raise ValueError("Agent config must be a dict (Pydantic v2 compatible)")
+            self.config = AgentConfig(**config)
             self._agent = None  # Will be initialized on first use
-            logger.info(f"Initialized {self.__class__.__name__} with model: {config.model_name}")
+            logger.info(f"Initialized {self.__class__.__name__} with model: {self.config.model_name}")
         except Exception as e:
             logger.error(f"Failed to initialize {self.__class__.__name__}: {str(e)}")
             raise ValueError(f"Invalid agent configuration: {str(e)}") from e
@@ -136,6 +115,10 @@ class BaseAgent:
         try:
             # Get the agent executor
             agent = self.agent
+            
+            # Ensure intermediate_steps is always a list
+            if 'intermediate_steps' not in kwargs or kwargs['intermediate_steps'] is None or isinstance(kwargs['intermediate_steps'], str):
+                kwargs['intermediate_steps'] = []
             
             # If the agent has an ainvoke method, use it
             if hasattr(agent, 'ainvoke') and callable(agent.ainvoke):
@@ -233,3 +216,40 @@ class BaseAgent:
             Exception: If processing fails
         """
         raise NotImplementedError("Subclasses must implement _process_impl")
+
+    def _contextual_followup(self, user_query: str, results: list, domain: str) -> str:
+        """Generate a contextual follow-up question based on the query, results, and domain."""
+        q = user_query.lower()
+        titles = ' '.join([str(r).lower() for r in results[:5]])
+        followup = []
+        if domain == "sports":
+            if any(x in q or x in titles for x in ['women', "women's"]):
+                followup.append("Do you want Women's or Men's match?")
+            elif 'men' in q or "men's" in titles:
+                followup.append("Do you want Men's or Women's match?")
+            if 'highlight' in q or 'highlight' in titles:
+                followup.append("Are you looking for highlights or live scorecard?")
+            if 'score' in q or 'live' in q or 'scorecard' in titles:
+                followup.append("Do you want the live score, full scorecard, or match summary?")
+            if not followup:
+                followup.append("Can you specify if you want news, scores, or something else? Or would you like to see more results?")
+        elif domain == "finance":
+            if "stock" in q or "market" in q:
+                followup.append("Are you interested in a specific stock, index, or market news?")
+            if not followup:
+                followup.append("Would you like more details, charts, or recent news?")
+        elif domain == "news":
+            if 'local' in q or 'city' in q or 'state' in q:
+                followup.append("Are you looking for local, national, or international news?")
+            if 'breaking' in q or 'alert' in q:
+                followup.append("Do you want breaking news, top headlines, or a specific topic?")
+            if not followup:
+                followup.append("Would you like more headlines, in-depth articles, or news on a specific topic?")
+        elif domain == "weather":
+            if 'today' in q or 'now' in q:
+                followup.append("Do you want the current weather, forecast, or severe weather alerts?")
+            if not followup:
+                followup.append("Would you like the forecast for today, this week, or a specific location?")
+        else:
+            followup.append("Can you clarify what specific information you want, or would you like to see more results?")
+        return '\n'.join(followup)

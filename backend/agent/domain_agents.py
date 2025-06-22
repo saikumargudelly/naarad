@@ -4,12 +4,15 @@ from pydantic import BaseModel, Field
 import logging
 import json
 import sys
+import asyncio
+import time
 
 # LangChain imports
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.agents.agent import AgentFinish, AgentAction, AgentStep
 from langchain.tools import BaseTool as LangChainBaseTool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage as LangChainSystemMessage, HumanMessage as LangChainHumanMessage
 from langchain_community.llms import Ollama
 
 # Local imports
@@ -18,6 +21,7 @@ from .registry import agent_registry, AgentRegistry
 from .types import AgentConfig, BaseAgent, AgentInitializationError
 from .tools.base import BaseTool
 from .memory.memory_manager import memory_manager
+from .monitoring.agent_monitor import agent_monitor
 
 # Local message types (imported after other local imports to avoid circular imports)
 from .message_types import AIMessage, HumanMessage, SystemMessage, BaseMessage
@@ -25,6 +29,38 @@ from .custom_messages import convert_to_message, convert_to_messages
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Rate limiting for Groq API
+class RateLimiter:
+    def __init__(self, max_requests_per_minute=50):
+        self.max_requests = max_requests_per_minute
+        self.requests = []
+        self.lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self.lock:
+            now = time.time()
+            # Remove requests older than 1 minute
+            self.requests = [req_time for req_time in self.requests if now - req_time < 60]
+            
+            if len(self.requests) >= self.max_requests:
+                # Wait until we can make another request
+                wait_time = 60 - (now - self.requests[0])
+                if wait_time > 0:
+                    logger.info(f"Rate limit reached, waiting {wait_time:.2f} seconds")
+                    await asyncio.sleep(wait_time)
+                    return await self.acquire()
+            
+            # Add a small delay between requests to prevent rapid successive calls
+            if self.requests:
+                time_since_last = now - self.requests[-1]
+                if time_since_last < 2.0:  # At least 2 seconds between requests
+                    await asyncio.sleep(2.0 - time_since_last)
+            
+            self.requests.append(now)
+
+# Global rate limiter
+rate_limiter = RateLimiter(max_requests_per_minute=5)  # Very conservative limit
 
 class DomainAgent:
     """Base class for all domain-specific agents."""
@@ -46,12 +82,27 @@ class DomainAgent:
         self.name = name or self.agent_name or self.__class__.__name__.lower()
         self.system_prompt = system_prompt or self.__doc__ or ""
         self.tools = tools or []
-        self.llm = self._create_llm(**kwargs)
-        self.agent = self._create_agent()
+        self._llm = None  # Lazy initialization
+        self._agent = None  # Lazy initialization
+        self._kwargs = kwargs  # Store kwargs for later use
         
         # Register the agent class if it has a name
         if self.agent_name and not agent_registry.is_registered(self.agent_name):
             agent_registry.register(self.agent_name, self.__class__)
+    
+    @property
+    def llm(self):
+        """Lazy-load the LLM when needed."""
+        if self._llm is None:
+            self._llm = self._create_llm(**self._kwargs)
+        return self._llm
+    
+    @property
+    def agent(self):
+        """Lazy-load the agent when needed."""
+        if self._agent is None:
+            self._agent = self._create_agent()
+        return self._agent
     
     @classmethod
     def register(cls, agent_class=None):
@@ -94,7 +145,7 @@ class DomainAgent:
         # Default to Groq if API key is available
         if hasattr(settings, 'GROQ_API_KEY') and settings.GROQ_API_KEY:
             return ChatGroq(
-                model_name="mixtral-8x7b-32768",
+                model_name="llama3-70b-8192",
                 temperature=self.default_temperature,
                 groq_api_key=settings.GROQ_API_KEY,
                 **{k: v for k, v in kwargs.items() if k not in ['headers', 'model_kwargs']}
@@ -131,28 +182,35 @@ class DomainAgent:
             AgentInitializationError: If agent creation fails
         """
         try:
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", self.system_prompt),
-                MessagesPlaceholder("chat_history"),
-                ("human", "{input}"),
-                MessagesPlaceholder("agent_scratchpad")
+            # Truncate system prompt
+            system_prompt = self.system_prompt[:1000]
+            # Truncate tools and tool_names
+            tools_list = self.tools[:3] if self.tools else []
+            tool_names_list = [t.name if hasattr(t, 'name') else str(t) for t in tools_list]
+            tool_names_str = ', '.join(tool_names_list[:3])
+            # Truncate tool descriptions
+            tools_str = '\n'.join([
+                (t.description[:200] if hasattr(t, 'description') else str(t)[:200])
+                for t in tools_list
             ])
-            
-            # Create the agent using ReAct pattern
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt + "\n\nYou have access to the following tools:\n{tools}\n\nUse the following format:\n\nQuestion: the input question you must answer\nThought: you should always think about what to do\nAction: the action to take, should be one of [{tool_names}]\nAction Input: the input to the action\nObservation: the result of the action\n... (this Thought/Action/Action Input/Observation can repeat N times)\nThought: I now know the final answer\nFinal Answer: the final answer to the original input question\n\nBegin!\n\nQuestion: {input}\nThought: {agent_scratchpad}"),
+                MessagesPlaceholder("chat_history")
+            ])
+            prompt = prompt.partial(tools=tools_str, tool_names=tool_names_str)
             agent = create_react_agent(
                 llm=self.llm,
-                tools=self.tools,
+                tools=tools_list,
                 prompt=prompt
             )
-            
             return AgentExecutor(
                 agent=agent,
-                tools=self.tools,
+                tools=tools_list,
                 verbose=settings.debug_mode,
                 handle_parsing_errors=True,
-                model_name="mixtral-8x7b-instruct-v0.1",
+                model_name="llama3-70b-8192",
                 max_iterations=5,
-                early_stopping_method="generate",
+                early_stopping_method="force",
                 max_execution_time=30,  # seconds
                 return_intermediate_steps=True
             )
@@ -170,38 +228,92 @@ class DomainAgent:
         """Process input with this agent."""
         with agent_monitor.track_request(self.name) as tracker:
             try:
-                # Get conversation history
-                memory = memory_manager.get_conversation(conversation_id, user_id) or {}
-                chat_history = memory.get('messages', [])
+                # Apply rate limiting
+                await rate_limiter.acquire()
                 
-                # Process with agent
-                result = await self.agent.ainvoke({
+                # Get formatted conversation history (truncated)
+                from .orchestrator import AgentOrchestrator
+                orchestrator = AgentOrchestrator()
+                formatted_history = await orchestrator._get_formatted_history(conversation_id, user_id)
+                
+                # Truncate context
+                context_str = json.dumps(context)[:1000]
+                
+                # Prepare arguments for ainvoke
+                invoke_args = {
                     "input": input_text,
-                    "chat_history": chat_history,
-                    "context": json.dumps(context)
-                })
-                
-                # Update agent state in memory
-                self._update_agent_state(conversation_id, user_id, {
-                    "last_used": datetime.utcnow().isoformat(),
-                    "input": input_text,
-                    "output": result["output"]
-                })
-                
-                return {
-                    "success": True,
-                    "output": result["output"],
-                    "agent": self.name
+                    "chat_history": [formatted_history],  # Pass as single formatted string
+                    "context": context_str,
+                    "agent_scratchpad": ""
                 }
                 
+                logger.debug(f"[{self.name}] Invoking agent with args: {invoke_args}")
+                logger.debug(f"[{self.name}] Agent type: {type(self.agent)}")
+                
+                result = await self.agent.ainvoke(invoke_args)
+                
+                tracker.success()
+                if isinstance(result, dict) and 'output' in result:
+                    return result
+                return {"success": True, "output": str(result), "agent": self.name}
             except Exception as e:
-                agent_monitor.record_error(
-                    self.name,
-                    error_type=type(e).__name__,
-                    error_message=str(e)
-                )
-                raise
+                tracker.error(e)
+                logger.error(f"Error in {self.name}: {e}")
+                return {"success": False, "output": f"Error: {str(e)}", "error": str(e), "agent": self.name}
     
+    async def process_stream(
+        self,
+        input_text: str,
+        context: Dict[str, Any],
+        conversation_id: str,
+        user_id: str = "default"
+    ):
+        """Process input with this agent and stream the response."""
+        # This base method is designed for ReAct agents.
+        # It should be overridden by agents that don't need this complexity.
+        with agent_monitor.track_request(self.name) as tracker:
+            try:
+                await rate_limiter.acquire()
+                from .orchestrator import AgentOrchestrator
+                orchestrator = AgentOrchestrator()
+                formatted_history = await orchestrator._get_formatted_history(conversation_id, user_id)
+                context_str = json.dumps(context)[:1000]
+
+                invoke_args = {
+                    "input": input_text,
+                    "chat_history": [formatted_history],
+                    "context": context_str,
+                }
+
+                full_response = ""
+                async for chunk in self.agent.astream(invoke_args):
+                    token = ""
+                    if isinstance(chunk, dict) and 'actions' in chunk:
+                        pass
+                    elif isinstance(chunk, dict) and 'steps' in chunk:
+                        pass
+                    elif isinstance(chunk, dict) and 'output' in chunk:
+                        token = chunk['output']
+                    elif isinstance(chunk, str):
+                        token = chunk
+
+                    if token:
+                        full_response += token
+                        yield {
+                            "type": "stream_chunk",
+                            "chunk": token
+                        }
+                
+                tracker.success()
+
+            except Exception as e:
+                tracker.error(e)
+                logger.error(f"Error in {self.name} stream: {e}", exc_info=True)
+                yield {
+                    "type": "error",
+                    "error": f"Error in {self.name}: {str(e)}"
+                }
+
     def _update_agent_state(
         self, 
         conversation_id: str, 
@@ -217,36 +329,94 @@ class DomainAgent:
         )
 
 def create_domain_agents() -> Dict[str, DomainAgent]:
-    """Create and return all registered domain agents.
+    """Create and return all domain-specific agents."""
+    agents = {}
     
-    This function initializes all registered domain agents and returns them
-    in a dictionary keyed by their agent names.
-    
-    Returns:
-        Dict[str, DomainAgent]: Dictionary mapping agent names to agent instances
-        
-    Raises:
-        AgentInitializationError: If any agent fails to initialize
-    """
     try:
-        # This will automatically register all decorated agents
-        from . import registry  # Import to trigger registration
+        # Create task management agent
+        agents['task_manager'] = TaskManagementAgent()
+        logger.info("Task management agent created successfully")
         
-        agents = {}
-        for agent_name in agent_registry.get_all_agent_names():
-            try:
-                agents[agent_name] = agent_registry.get_agent(agent_name)
-                logger.info(f"Successfully initialized agent: {agent_name}")
-            except Exception as e:
-                logger.error(f"Failed to initialize agent {agent_name}: {str(e)}", exc_info=True)
-                if settings.strict_mode:
-                    raise AgentInitializationError(f"Failed to initialize agent {agent_name}") from e
+        # Create creative writing agent
+        agents['creative_writer'] = CreativeWritingAgent()
+        logger.info("Creative writing agent created successfully")
         
+        # Create analysis agent
+        agents['analyst'] = AnalysisAgent()
+        logger.info("Analysis agent created successfully")
+        
+        # Create context-aware chat agent
+        agents['context_manager'] = ContextAwareChatAgent()
+        logger.info("Context-aware chat agent created successfully")
+        
+        # Create futuristic agents
+        try:
+            from .agents.emotion_agent import EmotionAgent
+            agents['emotion_agent'] = EmotionAgent({
+                "name": "emotion_agent",
+                "description": "Emotion detection and emotionally intelligent responses",
+                "model_name": "llama3-70b-8192"
+            })
+            logger.info("Emotion agent created successfully")
+        except ImportError as e:
+            logger.warning(f"Could not import EmotionAgent: {e}")
+        
+        try:
+            from .agents.creativity_agent import CreativityAgent
+            agents['creativity_agent'] = CreativityAgent({
+                "name": "creativity_agent",
+                "description": "Creative content generation and brainstorming",
+                "model_name": "llama3-70b-8192"
+            })
+            logger.info("Creativity agent created successfully")
+        except ImportError as e:
+            logger.warning(f"Could not import CreativityAgent: {e}")
+        
+        try:
+            from .agents.prediction_agent import PredictionAgent
+            agents['prediction_agent'] = PredictionAgent({
+                "name": "prediction_agent",
+                "description": "Pattern analysis and prediction making",
+                "model_name": "llama3-70b-8192"
+            })
+            logger.info("Prediction agent created successfully")
+        except ImportError as e:
+            logger.warning(f"Could not import PredictionAgent: {e}")
+        
+        try:
+            from .agents.learning_agent import LearningAgent
+            agents['learning_agent'] = LearningAgent({
+                "name": "learning_agent",
+                "description": "Adaptive learning and continuous improvement",
+                "model_name": "llama3-70b-8192"
+            })
+            logger.info("Learning agent created successfully")
+        except ImportError as e:
+            logger.warning(f"Could not import LearningAgent: {e}")
+        
+        try:
+            from .agents.quantum_agent import QuantumAgent
+            agents['quantum_agent'] = QuantumAgent({
+                "name": "quantum_agent",
+                "description": "Quantum-inspired problem solving and concepts",
+                "model_name": "llama3-70b-8192"
+            })
+            logger.info("Quantum agent created successfully")
+        except ImportError as e:
+            logger.warning(f"Could not import QuantumAgent: {e}")
+        
+        logger.info(f"Successfully created {len(agents)} domain agents")
         return agents
         
     except Exception as e:
-        logger.critical(f"Critical error initializing domain agents: {str(e)}", exc_info=True)
-        raise
+        logger.error(f"Error creating domain agents: {str(e)}", exc_info=True)
+        # Return basic agents if advanced ones fail
+        return {
+            'task_manager': TaskManagementAgent(),
+            'creative_writer': CreativeWritingAgent(),
+            'analyst': AnalysisAgent(),
+            'context_manager': ContextAwareChatAgent()
+        }
 
 @DomainAgent.register
 class TaskManagementAgent(DomainAgent):
@@ -285,13 +455,28 @@ class TaskManagementAgent(DomainAgent):
             if user_id not in self.task_storage:
                 self.task_storage[user_id] = []
                 
-            # Process with the base agent
-            result = await super().process(input_text, context, conversation_id, user_id)
+            # Extract task-related information
+            task_info = self._extract_task_info(input_text)
             
-            # Add any task-specific processing here
+            # Get existing tasks
+            memory = await memory_manager.get_conversation(conversation_id, user_id) or {}
+            tasks = memory.get('metadata', {}).get('tasks', [])
             
-            return result
-            
+            # Process task command
+            if "list" in input_text.lower():
+                return await self._list_tasks(tasks)
+            elif any(cmd in input_text.lower() for cmd in ["create", "add", "new"]):
+                return await self._create_task(input_text, task_info, tasks, conversation_id, user_id)
+            elif any(cmd in input_text.lower() for cmd in ["complete", "done", "finish"]):
+                return await self._update_task_status(input_text, tasks, "completed", conversation_id, user_id)
+            else:
+                # Process with the base agent
+                result = await super().process(input_text, context, conversation_id, user_id)
+                
+                # Add any task-specific processing here
+                
+                return result
+                
         except Exception as e:
             logger.error(f"Error in TaskManagementAgent: {str(e)}", exc_info=True)
             return {
@@ -299,24 +484,6 @@ class TaskManagementAgent(DomainAgent):
                 "output": "I encountered an error while processing your task. Please try again.",
                 "error": str(e)
             }
-    
-    async def process(self, input_text: str, context: Dict[str, Any], conversation_id: str, user_id: str = "default") -> Dict[str, Any]:
-        # Extract task-related information
-        task_info = self._extract_task_info(input_text)
-        
-        # Get existing tasks
-        memory = memory_manager.get_conversation(conversation_id, user_id) or {}
-        tasks = memory.get('metadata', {}).get('tasks', [])
-        
-        # Process task command
-        if "list" in input_text.lower():
-            return await self._list_tasks(tasks)
-        elif any(cmd in input_text.lower() for cmd in ["create", "add", "new"]):
-            return await self._create_task(input_text, task_info, tasks, conversation_id, user_id)
-        elif any(cmd in input_text.lower() for cmd in ["complete", "done", "finish"]):
-            return await self._update_task_status(input_text, tasks, "completed", conversation_id, user_id)
-        else:
-            return await super().process(input_text, context, conversation_id, user_id)
     
     def _extract_task_info(self, text: str) -> Dict[str, Any]:
         # Simple regex pattern to extract task details
@@ -351,11 +518,11 @@ class TaskManagementAgent(DomainAgent):
         }
         
         # Update tasks in memory
-        memory = memory_manager.get_conversation(conversation_id, user_id) or {}
+        memory = await memory_manager.get_conversation(conversation_id, user_id) or {}
         metadata = memory.get('metadata', {})
         metadata.setdefault('tasks', []).append(new_task)
         
-        memory_manager.save_conversation(
+        await memory_manager.save_conversation(
             conversation_id=conversation_id,
             user_id=user_id,
             messages=memory.get('messages', []),
@@ -388,11 +555,11 @@ class TaskManagementAgent(DomainAgent):
             tasks[task_idx]["completed_at"] = datetime.utcnow().isoformat()
             
             # Update tasks in memory
-            memory = memory_manager.get_conversation(conversation_id, user_id) or {}
+            memory = await memory_manager.get_conversation(conversation_id, user_id) or {}
             metadata = memory.get('metadata', {})
             metadata['tasks'] = tasks
             
-            memory_manager.save_conversation(
+            await memory_manager.save_conversation(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 messages=memory.get('messages', []),
@@ -560,61 +727,57 @@ class ContextAwareChatAgent(DomainAgent):
         """Initialize the context-aware chat agent."""
         super().__init__(**kwargs)
         self.conversation_history = {}
-    
-    async def process(self, input_text: str, context: Dict[str, Any], conversation_id: str, user_id: str = "default") -> Dict[str, Any]:
-        """Process a chat message with context awareness.
-        
-        Args:
-            input_text: The user's input text
-            context: Additional context including any files or metadata
-            conversation_id: ID of the current conversation
-            user_id: ID of the current user
-            
-        Returns:
-            Dict containing the response and metadata
+
+    async def process_stream(
+        self,
+        input_text: str,
+        context: Dict[str, Any],
+        conversation_id: str,
+        user_id: str = "default"
+    ):
         """
-        try:
-            # Get or initialize conversation history
-            if conversation_id not in self.conversation_history:
-                self.conversation_history[conversation_id] = []
-            
-            # Add user message to history
-            self.conversation_history[conversation_id].append({"role": "user", "content": input_text})
-            
-            # Get conversation memory
-            memory = memory_manager.get_conversation(conversation_id, user_id) or {}
-            chat_history = memory.get('messages', [])
-            
-            # Analyze context
-            context_analysis = self._analyze_context(input_text, chat_history, context)
-            
-            # Process with the base agent
-            result = await super().process(input_text, context, conversation_id, user_id)
-            
-            if result.get("success", False):
-                # Add assistant response to history
-                self.conversation_history[conversation_id].append({
-                    "role": "assistant", 
-                    "content": result.get("output", "")
-                })
+        Process a chat message with context awareness using a simple,
+        direct streaming approach. This bypasses the complex ReAct agent.
+        """
+        with agent_monitor.track_request(self.name) as tracker:
+            try:
+                await rate_limiter.acquire()
+                from .orchestrator import AgentOrchestrator
+                orchestrator = AgentOrchestrator()
                 
-                # Add context metadata to the response
-                result["metadata"] = result.get("metadata", {})
-                result["metadata"]["conversation_length"] = len(self.conversation_history[conversation_id])
-                result["metadata"]["context_analysis"] = context_analysis
+                formatted_history = await orchestrator._get_formatted_history(conversation_id, user_id)
                 
-                # Add conversation history to context for next turn
-                context["conversation_history"] = self.conversation_history[conversation_id][-10:]  # Last 10 messages
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in ContextAwareChatAgent: {str(e)}", exc_info=True)
-            return {
-                "success": False,
-                "output": "I encountered an error while processing your message. Please try again.",
-                "error": str(e)
-            }
+                messages = [
+                    LangChainSystemMessage(content=self.system_prompt),
+                    MessagesPlaceholder(variable_name="chat_history"),
+                    LangChainHumanMessage(content=input_text)
+                ]
+                
+                prompt = ChatPromptTemplate.from_messages(messages)
+                
+                chain = prompt | self.llm
+                full_response = ""
+                async for chunk in chain.astream({
+                    "chat_history": [LangChainHumanMessage(content=formatted_history)],
+                    "input": input_text
+                }):
+                    token = chunk.content
+                    if token:
+                        full_response += token
+                        yield {
+                            "type": "stream_chunk",
+                            "chunk": token
+                        }
+                
+                tracker.success()
+
+            except Exception as e:
+                tracker.error(e)
+                logger.error(f"Error in {self.name} stream: {e}", exc_info=True)
+                yield {
+                    "type": "error",
+                    "error": f"Error in {self.name}: {str(e)}"
+                }
     
     def _analyze_context(
         self, 
@@ -639,13 +802,6 @@ class ContextAwareChatAgent(DomainAgent):
             'topics': set(),
             'entities': set()
         }
-        
-        # Convert chat history to a format suitable for analysis
-        messages: List[BaseMessage] = convert_to_messages(chat_history)
-        
-        # Add the current message
-        current_message = HumanMessage(content=input_text)
-        messages.append(current_message)
         
         # Simple keyword extraction for topic tracking
         input_lower = input_text.lower()

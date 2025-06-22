@@ -1,143 +1,569 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { ArrowPathIcon } from '@heroicons/react/24/outline';
-import { motion } from 'framer-motion';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import MessageList from './MessageList';
 import MessageInput from './MessageInput';
+import VoiceInterface from './VoiceInterface';
+import Sidebar from './Sidebar';
+import { 
+  Mic, 
+  MicOff, 
+  Settings, 
+  Volume2, 
+  VolumeX,
+  MessageSquare,
+  Zap,
+  BarChart3,
+  User
+} from 'lucide-react';
 
-const ChatInterface = ({ 
-  messages, 
-  setMessages, 
-  conversationId, 
-  setConversationId,
-  isLoading,
-  isSending 
-}) => {
+const ChatInterface = () => {
+  const [messages, setMessages] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [showVoiceInterface, setShowVoiceInterface] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [userPreferences, setUserPreferences] = useState({});
+  const [analyticsData, setAnalyticsData] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const [currentUserId] = useState(`user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+  const wsRef = useRef(null);
+
   const messagesEndRef = useRef(null);
-  
-  // Auto-scroll to bottom of messages
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-  
+
+  // Scroll to bottom when new messages arrive
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // API base URL - FIXED: Added /v1 to match backend endpoint
-  const API_BASE_URL = 'http://localhost:8000/api/v1';
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
-  // Function to send message to the backend
-  const sendMessage = useCallback(async (newMessage) => {
-    // 1. Immediately add user message to the UI
-    const userMessage = {
-      text: newMessage,
-      sender: 'user',
-      timestamp: new Date().toISOString()
+  // Establish a single, stable WebSocket connection.
+  useEffect(() => {
+    // If a connection already exists, do nothing.
+    if (wsRef.current) return;
+
+    const ws = new WebSocket(`ws://localhost:8000/api/v1/ws/${currentUserId}`);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setConnectionStatus('connected');
+      console.log('WebSocket connected');
     };
-    setMessages(prev => [...prev, userMessage]);
 
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleWebSocketMessage(data);
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error);
+      }
+    };
+
+    ws.onclose = (event) => {
+      setConnectionStatus('disconnected');
+      console.log('WebSocket closed:', event.code, event.reason);
+    };
+
+    ws.onerror = (error) => {
+      setConnectionStatus('error');
+      console.error('WebSocket error:', error);
+    };
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Component unmounting');
+        wsRef.current = null;
+      }
+    };
+  }, []); // Empty dependency array ensures this runs only once.
+
+  // Handle WebSocket messages
+  const handleWebSocketMessage = (data) => {
+    // Always remove typing indicator when a new message comes in
+    setMessages(prev => prev.filter(msg => !msg.isTyping));
+
+    switch (data.type) {
+      case 'message':
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          text: data.content,
+          sender: 'assistant',
+          timestamp: new Date().toISOString(),
+          isStreaming: false
+        }]);
+        break;
+      
+      case 'stream_chunk':
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastMessage = newMessages[newMessages.length - 1];
+          
+          if (lastMessage && lastMessage.sender === 'assistant' && lastMessage.isStreaming) {
+            lastMessage.text += data.chunk;
+          } else {
+            newMessages.push({
+              id: Date.now(),
+              text: data.chunk,
+              sender: 'assistant',
+              timestamp: new Date().toISOString(),
+              isStreaming: true
+            });
+          }
+          
+          return newMessages;
+        });
+        break;
+      
+      case 'stream_end':
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastMessage = newMessages[newMessages.length - 1];
+          
+          if (lastMessage && lastMessage.sender === 'assistant') {
+            lastMessage.isStreaming = false;
+          }
+          
+          return newMessages;
+        });
+        setIsLoading(false);
+        break;
+      
+      case 'typing_start':
+        // Handle typing indicator
+        setMessages(prev => {
+          // Prevent adding multiple typing indicators
+          if (prev.some(msg => msg.isTyping)) {
+            return prev;
+          }
+          return [...prev, {
+            id: Date.now(),
+            text: '🤖 Assistant is typing...',
+            sender: 'system',
+            timestamp: new Date().toISOString(),
+            isTyping: true
+          }];
+        });
+        break;
+      
+      case 'typing_stop':
+        // Remove typing indicator
+        setMessages(prev => prev.filter(msg => !msg.isTyping));
+        break;
+      
+      case 'conversation_id':
+        // Store conversation ID for future reference
+        if (data.conversation_id) {
+          console.log('Conversation ID:', data.conversation_id);
+        }
+        break;
+      
+      case 'message_complete':
+        // Handle message completion
+        setIsLoading(false);
+        // Remove typing indicator if present
+        setMessages(prev => prev.filter(msg => !msg.isTyping));
+        break;
+      
+      case 'error':
+        console.error('WebSocket error from backend:', data.error || 'No error message provided');
+        setIsLoading(false);
+        break;
+      
+      default:
+        // Log unknown message types but don't show error
+        if (data.type && !['ping', 'pong', 'heartbeat'].includes(data.type)) {
+          console.log('Unknown message type:', data.type, data);
+        }
+    }
+  };
+
+  // Only send message on user action
+  const sendMessage = (message, conversationId = null) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const messageData = {
+        type: 'text',
+        message,
+        conversation_id: conversationId,
+      };
+      wsRef.current.send(JSON.stringify(messageData));
+      setIsLoading(true);
+      // Optionally, add the user message to the UI immediately
+      setMessages(prev => [
+        ...prev,
+        {
+          id: Date.now(),
+          text: message,
+          sender: 'user',
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    } else {
+      alert('Connection lost. Please refresh the page.');
+    }
+  };
+
+  // Handle voice input
+  const handleVoiceInput = useCallback(async (voiceData) => {
+    switch (voiceData.type) {
+      case 'recording_started':
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          text: '🎤 Recording...',
+          sender: 'system',
+          timestamp: new Date().toISOString()
+        }]);
+        break;
+      
+      case 'recording_stopped':
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          text: '🔄 Processing audio...',
+          sender: 'system',
+          timestamp: new Date().toISOString()
+        }]);
+        break;
+      
+      case 'transcription_complete':
+        // Remove the processing message
+        setMessages(prev => prev.filter(msg => msg.text !== '🔄 Processing audio...'));
+        
+        // Add transcription message
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          text: `🎤 "${voiceData.text}"`,
+          sender: 'user',
+          timestamp: new Date().toISOString(),
+          isVoiceInput: true
+        }]);
+        
+        // Send the transcribed text
+        sendMessage(voiceData.text, null);
+        break;
+    }
+  }, [sendMessage]);
+
+  // Handle voice output
+  const handleVoiceOutput = useCallback((voiceData) => {
+    if (voiceData.type === 'audio_playing') {
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        text: '🔊 Playing audio response...',
+        sender: 'system',
+        timestamp: new Date().toISOString()
+      }]);
+    }
+  }, []);
+
+  // Learn from interaction for personalization
+  const learnFromInteraction = async (userMessage, response) => {
     try {
-      // 2. Prepare the request for the backend
-      const chatHistoryForAPI = messages
-        .filter(msg => msg.sender === 'user' || msg.sender === 'ai')
-        .map(msg => ({
-          role: msg.sender === 'user' ? 'user' : 'assistant',
-          content: msg.text
-        }));
-
-      const response = await fetch(`${API_BASE_URL}/chat`, {
+      await fetch('/api/v1/personalization/learn', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          message: newMessage,
-          conversation_id: conversationId,
-          chat_history: chatHistoryForAPI // Send the structured history
-        }),
+          user_id: currentUserId,
+          message: userMessage,
+          response: response,
+          interaction_type: 'chat',
+          context: {
+            timestamp: new Date().toISOString(),
+            source: 'web_interface'
+          }
+        })
       });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      // 3. Extract response text and add AI message to UI
-      const responseText = data.message || JSON.stringify(data, null, 2);
-
-      const aiMessage = {
-        text: responseText,
-        sender: 'ai',
-        timestamp: new Date().toISOString()
-      };
-      
-      if (data.conversation_id && !conversationId) {
-        setConversationId(data.conversation_id);
-      }
-      
-      // Update messages with the AI response
-      setMessages(prev => [...prev, aiMessage]);
-      
     } catch (error) {
-      console.error('Error sending message:', error);
-      const errorMessage = {
-        text: `Sorry, I encountered an error: ${error.message}. Please try again.`,
-        sender: 'ai',
-        timestamp: new Date().toISOString(),
-        isError: true
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      console.error('Failed to learn from interaction:', error);
     }
-  }, [conversationId, messages, setConversationId, setMessages]);
+  };
 
-  // Handle new chat
-  const handleNewChat = useCallback(() => {
-    setMessages([]);
-    setConversationId(null);
-  }, [setMessages, setConversationId]);
+  // Get user preferences
+  const fetchUserPreferences = async () => {
+    try {
+      const response = await fetch(`/api/v1/personalization/preferences/${currentUserId}`);
+      if (response.ok) {
+        const data = await response.json();
+        setUserPreferences(data.preferences || {});
+      }
+    } catch (error) {
+      console.error('Failed to fetch user preferences:', error);
+    }
+  };
+
+  // Get analytics data
+  const fetchAnalyticsData = async () => {
+    try {
+      const response = await fetch('/api/v1/analytics/monitoring', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          time_range: '24h',
+          metrics: ['response_time', 'success_rate', 'user_engagement'],
+          user_id: currentUserId
+        })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setAnalyticsData(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch analytics data:', error);
+    }
+  };
+
+  // Test voice features
+  const testVoiceFeatures = async () => {
+    try {
+      const response = await fetch('/api/v1/voice/health');
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Voice service health:', data);
+      }
+    } catch (error) {
+      console.error('Voice health check failed:', error);
+    }
+  };
+
+  // Load initial data
+  useEffect(() => {
+    fetchUserPreferences();
+    fetchAnalyticsData();
+    testVoiceFeatures();
+  }, []);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Chat Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-        <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full flex items-center justify-center">
-            <span className="text-white text-sm font-bold">N</span>
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-              Naarad AI Assistant
-            </h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              Your curious AI companion
-            </p>
+    <div className="chat-interface">
+      {/* Header */}
+      <div className="chat-header">
+        <div className="header-left">
+          <button
+            onClick={() => setShowSidebar(!showSidebar)}
+            className="sidebar-toggle"
+          >
+            <Settings size={20} />
+          </button>
+          
+          <h1>Naarad AI Assistant</h1>
+          
+          <div className="connection-status">
+            <div className={`status-indicator ${connectionStatus}`}></div>
+            <span>{connectionStatus}</span>
           </div>
         </div>
         
-        <button
-          onClick={handleNewChat}
-          className="flex items-center space-x-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
-        >
-          <ArrowPathIcon className="w-4 h-4" />
-          <span>New Chat</span>
-        </button>
+        <div className="header-right">
+          <button
+            onClick={() => setShowVoiceInterface(!showVoiceInterface)}
+            className={`voice-toggle ${voiceEnabled ? 'enabled' : 'disabled'}`}
+            title={voiceEnabled ? 'Voice Enabled' : 'Voice Disabled'}
+          >
+            {voiceEnabled ? <Mic size={20} /> : <MicOff size={20} />}
+          </button>
+          
+          <button
+            onClick={fetchAnalyticsData}
+            className="analytics-button"
+            title="View Analytics"
+          >
+            <BarChart3 size={20} />
+          </button>
+        </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        <MessageList messages={messages} />
-        <div ref={messagesEndRef} />
+      {/* Main Content */}
+      <div className="chat-content">
+        {/* Sidebar */}
+        {showSidebar && (
+          <Sidebar
+            userPreferences={userPreferences}
+            analyticsData={analyticsData}
+            onClose={() => setShowSidebar(false)}
+          />
+        )}
+
+        {/* Chat Area */}
+        <div className="chat-area">
+          <MessageList 
+            messages={messages} 
+            isLoading={isLoading}
+          />
+          
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Voice Interface */}
+        {showVoiceInterface && (
+          <div className="voice-panel">
+            <VoiceInterface
+              onVoiceInput={handleVoiceInput}
+              onVoiceOutput={handleVoiceOutput}
+              isListening={isLoading}
+              isProcessing={isLoading}
+              voiceEnabled={voiceEnabled}
+              onToggleVoice={() => setVoiceEnabled(!voiceEnabled)}
+            />
+          </div>
+        )}
       </div>
 
       {/* Input Area */}
-      <div className="border-t border-gray-200 dark:border-gray-700 p-4">
-        <MessageInput 
+      <div className="input-area">
+        <MessageInput
           onSendMessage={sendMessage}
           isLoading={isLoading}
-          isSending={isSending}
+          voiceEnabled={voiceEnabled}
+          onVoiceToggle={() => setVoiceEnabled(!voiceEnabled)}
         />
       </div>
+
+      <style>{`
+        .chat-interface {
+          display: flex;
+          flex-direction: column;
+          height: 100vh;
+          background: #0f0f0f;
+          color: #e5e7eb;
+        }
+
+        .chat-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 16px 24px;
+          background: #1a1a1a;
+          border-bottom: 1px solid #333;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-left {
+          display: flex;
+          align-items: center;
+          gap: 16px;
+        }
+
+        .header-left h1 {
+          margin: 0;
+          font-size: 24px;
+          font-weight: 600;
+          background: linear-gradient(135deg, #2563eb, #7c3aed);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+        }
+
+        .connection-status {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 14px;
+        }
+
+        .status-indicator {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+        }
+
+        .status-indicator.connected {
+          background: #10b981;
+        }
+
+        .status-indicator.disconnected {
+          background: #6b7280;
+        }
+
+        .status-indicator.error {
+          background: #ef4444;
+        }
+
+        .header-right {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+
+        .sidebar-toggle,
+        .voice-toggle,
+        .analytics-button {
+          padding: 8px;
+          border-radius: 8px;
+          border: 1px solid #374151;
+          background: #374151;
+          color: white;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.3s ease;
+        }
+
+        .sidebar-toggle:hover,
+        .voice-toggle:hover,
+        .analytics-button:hover {
+          background: #4b5563;
+          transform: translateY(-1px);
+        }
+
+        .voice-toggle.enabled {
+          background: #2563eb;
+          border-color: #2563eb;
+        }
+
+        .voice-toggle.enabled:hover {
+          background: #1d4ed8;
+        }
+
+        .voice-toggle.disabled {
+          background: #6b7280;
+          border-color: #6b7280;
+        }
+
+        .chat-content {
+          display: flex;
+          flex: 1;
+          overflow: hidden;
+        }
+
+        .chat-area {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+
+        .voice-panel {
+          width: 400px;
+          background: #1a1a1a;
+          border-left: 1px solid #333;
+          overflow-y: auto;
+        }
+
+        .input-area {
+          padding: 16px 24px;
+          background: #1a1a1a;
+          border-top: 1px solid #333;
+        }
+
+        @media (max-width: 768px) {
+          .voice-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
+            z-index: 1000;
+          }
+          
+          .header-left h1 {
+            font-size: 20px;
+          }
+        }
+      `}</style>
     </div>
   );
 };

@@ -3,6 +3,17 @@
 from enum import Enum
 from pydantic import Field
 from pydantic_settings import BaseSettings
+import logging
+import logging.handlers
+import os
+from typing import Optional
+from pydantic import ConfigDict
+
+try:
+    import json_log_formatter
+    HAS_JSON_LOG = True
+except ImportError:
+    HAS_JSON_LOG = False
 
 class LogLevel(str, Enum):
     """Logging levels."""
@@ -117,8 +128,68 @@ class LoggingSettings(BaseSettings):
         description="List of sensitive field names to mask"
     )
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = 'utf-8'
-        case_sensitive = True
-        extra = 'ignore'
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        case_sensitive=True,
+        extra='ignore',
+    )
+
+def setup_logging(settings: Optional[LoggingSettings] = None):
+    """
+    Set up logging configuration for the application.
+    Args:
+        settings (LoggingSettings, optional): Logging settings. If None, defaults are used.
+    """
+    if settings is None:
+        settings = LoggingSettings()
+
+    log_level = getattr(logging, str(settings.LOG_LEVEL), logging.INFO)
+    log_format = settings.LOG_FORMAT
+
+    # Ensure log directory exists
+    log_dir = os.path.dirname(settings.LOG_FILE)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Remove all handlers first (for reloads)
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Console Handler
+    if settings.ENABLE_CONSOLE_LOGGING:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, str(settings.CONSOLE_LOG_LEVEL), logging.INFO))
+        if settings.ENABLE_STRUCTURED_LOGGING and HAS_JSON_LOG:
+            formatter = json_log_formatter.JSONFormatter()
+        else:
+            formatter = logging.Formatter(log_format)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+
+    # File Handler
+    if settings.ENABLE_FILE_LOGGING:
+        file_handler = logging.handlers.RotatingFileHandler(
+            settings.LOG_FILE,
+            maxBytes=settings.LOG_FILE_MAX_SIZE,
+            backupCount=settings.LOG_FILE_BACKUP_COUNT,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(getattr(logging, str(settings.FILE_LOG_LEVEL), logging.DEBUG))
+        if settings.ENABLE_STRUCTURED_LOGGING and HAS_JSON_LOG:
+            formatter = json_log_formatter.JSONFormatter()
+        else:
+            formatter = logging.Formatter(log_format)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    # Optionally, add more handlers (e.g., error tracking, performance logs) here
+
+    # Suppress overly verbose loggers if needed
+    logging.getLogger('uvicorn.access').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.error').setLevel(logging.INFO)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
+
+    root_logger.info("Logging is configured.")

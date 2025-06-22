@@ -3,6 +3,11 @@ import { motion } from 'framer-motion';
 import Message from './Message';
 
 const MessageList = ({ messages }) => {
+  // Safety check for undefined or null messages
+  if (!messages) {
+    messages = [];
+  }
+
   if (messages.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center">

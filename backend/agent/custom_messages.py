@@ -21,9 +21,10 @@ class BaseMessage(BaseModel):
     )
     
     def __init__(self, content: str, **kwargs):
-        # Ensure type is set by the subclass
+        # Ensure type is set by the subclass, but don't access self.type during init
         if 'type' not in kwargs:
-            kwargs['type'] = self.type
+            # Get the type from the class, not the instance
+            kwargs['type'] = getattr(self.__class__, 'type', 'unknown')
         super().__init__(content=content, **kwargs)
     
     def to_dict(self) -> Dict[str, Any]:

@@ -1,3 +1,6 @@
+# (This file is now obsolete; all Brave Search functionality is handled in agent/tools/brave_search.py)
+# You may safely delete this file if not used elsewhere.
+
 from typing import Optional, Type
 from langchain.tools import BaseTool
 from langchain.callbacks.manager import CallbackManagerForToolRun, AsyncCallbackManagerForToolRun

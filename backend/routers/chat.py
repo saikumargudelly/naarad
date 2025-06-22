@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 # Import compatibility layer
 from agent.compat import get_rate_limiter, create_compatible_model_config
 
-from agent.naarad_agent import naarad_agent
+from dependencies import get_naarad_agent
 from config.config import settings
 
 router = APIRouter()
@@ -81,7 +81,8 @@ async def chat(
     try:
         start_time = datetime.utcnow()
         
-        response = await naarad_agent.process_message(
+        agent = get_naarad_agent()
+        response = await agent.process_message(
             message=chat_request.message,
             images=chat_request.images,
             chat_history=chat_request.chat_history

@@ -3,6 +3,11 @@ import { motion } from 'framer-motion';
 import { UserCircleIcon } from '@heroicons/react/24/outline';
 
 const Message = ({ message }) => {
+  // Safety check for undefined or null message
+  if (!message) {
+    return null;
+  }
+
   const isUser = message.sender === 'user';
   const isError = message.isError;
 

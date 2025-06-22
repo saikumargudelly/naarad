@@ -7,7 +7,7 @@ from enum import Enum
 from typing import List, Optional, Dict, Any, Union, Literal
 from pathlib import Path
 from pydantic import Field, field_validator, model_validator, ConfigDict
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 from pydantic.networks import AnyHttpUrl, HttpUrl
 
 # Import domain-specific configurations
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     """Main application settings combining all domain configurations."""
     
     # Model configuration
-    model_config = SettingsConfigDict(
+    model_config = ConfigDict(
         env_file=".env",
         env_file_encoding='utf-8',
         case_sensitive=True,

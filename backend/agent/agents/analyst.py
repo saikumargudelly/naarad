@@ -40,11 +40,20 @@ class AnalystAgent(BaseAgent):
                 'description': 'Specialized in analyzing information and providing insights.',
                 'model_name': settings.REASONING_MODEL,
                 'temperature': 0.5,
-                'system_prompt': """You are an analytical assistant. Your job is to analyze information, identify patterns, 
-                and provide clear, insightful analysis. Consider multiple perspectives and provide balanced viewpoints. 
-                Highlight key findings and their implications.
-                
-                When you need to perform analysis, you can use the available tools to gather information.""",
+                'system_prompt': """
+You are an expert analytical assistant. Your responsibilities are:
+
+1. Thoroughly analyze the provided information, breaking down complex data into clear, actionable insights.
+2. Always consider multiple perspectives and highlight key findings, trends, and implications.
+3. Use available tools for data analysis when appropriate, and clearly explain your methodology and reasoning.
+4. Structure your responses with clear headings, bullet points, and concise summaries for maximum clarity.
+5. If information is incomplete or ambiguous, state your assumptions and suggest follow-up questions or next steps.
+6. Always cite sources or reference data when possible.
+7. For ambiguous or broad queries, ask clarifying questions before proceeding with analysis.
+8. Never fabricate data or analysis; be transparent about any limitations or uncertainties.
+
+Be objective, thorough, and ensure your analysis is actionable and easy to understand.
+""",
                 'max_iterations': 5
             }
             
@@ -95,7 +104,7 @@ class AnalystAgent(BaseAgent):
             prompt = ChatPromptTemplate.from_messages([
                 ("system", self.config.system_prompt),
                 ("human", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
+                MessagesPlaceholder(variable_name="intermediate_steps"),
             ])
             
             # Get tools or use a dummy tool
@@ -189,32 +198,25 @@ class AnalystAgent(BaseAgent):
             Dict containing the analysis results and metadata
         """
         try:
-            # Prepare the input for the agent
             context = kwargs.pop('context', '')
             format = kwargs.pop('format', 'markdown')
-            
-            # Add format instructions to the input
             if format == 'markdown':
                 input_text = f"{input_text}\n\nPlease format your response in markdown with appropriate headings and lists."
             elif format == 'json':
                 input_text = f"{input_text}\n\nPlease provide your response in valid JSON format."
-            
-            # Add context if provided
             if context:
                 input_text = f"Context: {context}\n\nQuestion: {input_text}"
-            
-            # Execute the agent
             result = self.agent.invoke({
                 "input": input_text,
                 **kwargs
             })
-            
-            # Post-process the result based on the requested format
             output = result.get('output', '')
-            
             if format == 'markdown' and not output.startswith('#'):
                 output = f"# Analysis\n\n{output}"
-            
+            # Contextual follow-up if multiple findings/sections
+            if output.count('\n# ') > 1 or output.count('\n- ') > 3:
+                followup = self._contextual_followup(input_text, [output], domain='finance')
+                output += f"\n\n{followup}"
             return {
                 'output': output,
                 'metadata': {
@@ -222,7 +224,6 @@ class AnalystAgent(BaseAgent):
                     'success': True
                 }
             }
-            
         except Exception as e:
             logger.error(f"Error in analysis process: {str(e)}", exc_info=True)
             return {

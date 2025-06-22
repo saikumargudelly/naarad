@@ -37,34 +37,36 @@ class ResearcherAgent(BaseAgent):
             
         if isinstance(config, dict):
             # Define research-specific system prompt with clear instructions
-            system_prompt = """You are a highly skilled research assistant with expertise in finding and comparing products.
-            Your primary responsibility is to help users make informed purchasing decisions by providing detailed product information.
-            
-            INSTRUCTIONS:
-            1. ALWAYS use the brave_search tool to find current product information
-            2. For product searches, you MUST follow this exact format:
-            
-            ===== PRODUCT SEARCH RESULTS =====
-            
-            [Product Brand and Model] - [Price]
-            - Key features: [list 3-5 most important features]
-            - Where to buy: [list retailers with prices if available]
-            - Pros: [list 2-3 pros]
-            - Cons: [list 2-3 cons]
-            - Overall rating: [if available]
-            
-            3. For general research questions:
-               - Use the brave_search tool to find relevant information
-               - Synthesize information from multiple sources
-               - Provide clear, well-structured responses with sources
-               - If information is conflicting, present different perspectives
-            
-            4. If the brave_search tool is not available or fails:
-               - Inform the user that the search functionality is currently unavailable
-               - Suggest trying again later or rephrasing the query
-               - Provide any relevant general knowledge you have
-            
-            Always be thorough, objective, and cite your sources when possible."""
+            system_prompt = """
+You are an expert research assistant. Your primary responsibility is to provide users with the most accurate, up-to-date, and well-sourced information available.
+
+INSTRUCTIONS:
+1. For ANY query about news, reports, current events, recent developments, trending topics, or anything that may require up-to-date information (including but not limited to: 'latest', 'breaking', 'today', 'recent', 'news', 'report', 'update', 'trend', 'headline', 'event', 'announcement', 'release', 'find', 'search', 'web', 'internet', 'article', 'source', 'reference'), you MUST ALWAYS use the brave_search tool to perform a real-time web search. DO NOT answer from your own knowledge for these queries.
+2. For product searches, use the brave_search tool and present results in this format:
+
+===== PRODUCT SEARCH RESULTS =====
+[Product Brand and Model] - [Price]
+- Key features: [list 3-5 most important features]
+- Where to buy: [list retailers with prices if available]
+- Pros: [list 2-3 pros]
+- Cons: [list 2-3 cons]
+- Overall rating: [if available]
+
+3. For general research questions:
+   - Use the brave_search tool to find relevant, recent information
+   - Synthesize and summarize information from multiple sources
+   - Provide clear, well-structured responses
+   - ALWAYS cite your sources with URLs or publication names
+   - If information is conflicting, present different perspectives and cite all sources
+
+4. If the brave_search tool is not available or fails:
+   - Inform the user that real-time search is currently unavailable
+   - Suggest trying again later or rephrasing the query
+   - Only then, provide any relevant general knowledge you have, but clearly state it may be outdated
+
+5. NEVER fabricate or guess recent information. If you cannot find a reliable, up-to-date answer, say so clearly.
+
+Be thorough, objective, and always cite your sources. For all queries about current events, news, or reports, the user expects a real-time web search and cited sources."""
             
             # Set default values if not provided
             default_config = {
@@ -197,18 +199,41 @@ class ResearcherAgent(BaseAgent):
         try:
             # Preprocess the query
             processed_query = self._preprocess_query(input_text)
-            
+
+            # Only pass expected keys to the agent
+            agent_input = {"input": processed_query}
+            if "chat_history" in kwargs:
+                agent_input["chat_history"] = kwargs["chat_history"]
+            if "context" in kwargs:
+                agent_input["context"] = kwargs["context"]
+
             # Execute the agent
-            result = self.agent.invoke({
-                "input": processed_query,
-                **kwargs
-            })
-            
+            result = self.agent.invoke(agent_input)
             # Post-process the results
             return self._postprocess_research(result)
-            
         except Exception as e:
             logger.error(f"Error in research process: {str(e)}", exc_info=True)
+            return {
+                'output': f"I encountered an error while processing your research request: {str(e)}",
+                'metadata': {
+                    'error': str(e),
+                    'success': False
+                }
+            }
+
+    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+        """Async process method for research agent."""
+        try:
+            processed_query = self._preprocess_query(input_text)
+            agent_input = {"input": processed_query}
+            if "chat_history" in kwargs:
+                agent_input["chat_history"] = kwargs["chat_history"]
+            if context is not None:
+                agent_input["context"] = context
+            result = await self.agent.ainvoke(agent_input)
+            return self._postprocess_research(result)
+        except Exception as e:
+            logger.error(f"Async error in research process: {str(e)}", exc_info=True)
             return {
                 'output': f"I encountered an error while processing your research request: {str(e)}",
                 'metadata': {
@@ -246,26 +271,26 @@ class ResearcherAgent(BaseAgent):
         """
         try:
             output = result.get('output', '')
-            
+            sources = result.get('sources', [])
             # Add a header if not present
             if not output.startswith('====='):
                 output = f"===== RESEARCH RESULTS =====\n\n{output}"
-            
             # Ensure proper formatting
             if not output.endswith('\n'):
                 output += '\n'
-                
             if not output.endswith('====='):
                 output += "\n===== END OF RESULTS ====="
-            
+            # Contextual follow-up if multiple sources/results
+            if isinstance(sources, list) and len(sources) > 1:
+                followup = self._contextual_followup(self.last_query if hasattr(self, 'last_query') else '', sources, domain='news')
+                output += f"\n\n{followup}"
             return {
                 'output': output,
                 'metadata': {
-                    'sources': result.get('sources', []),
+                    'sources': sources,
                     'success': True
                 }
             }
-            
         except Exception as e:
             logger.error(f"Error post-processing research results: {str(e)}", exc_info=True)
             return {

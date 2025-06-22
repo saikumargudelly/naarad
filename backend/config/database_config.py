@@ -3,6 +3,7 @@
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 class DatabaseSettings(BaseSettings):
     """Database-specific settings."""
@@ -47,8 +48,9 @@ class DatabaseSettings(BaseSettings):
         description="Automatically run database migrations on startup"
     )
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = 'utf-8'
-        case_sensitive = True
-        extra = 'ignore' 
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        case_sensitive=True,
+        extra='ignore',
+    ) 

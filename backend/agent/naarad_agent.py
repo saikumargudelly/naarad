@@ -191,44 +191,14 @@ class NaaradAgent:
             ('analyst', {'tools': analysis_tools}),
             ('quality', {'tools': quality_tools})
         ]
-        
-        for agent_name, config in agent_configs:
-            try:
-                # Create agent using the correct method signature
-                agent = self.agent_manager.create_agent(
-                    name=agent_name,
-                    agent_type=agent_name,
-                    **config,  # Pass tools and other config as kwargs
-                    model_name="llama3-8b-8192",
-                    temperature=0.7,
-                    max_iterations=5
-                )
-                self.base_agents[agent_name] = agent
-                logger.info(f"Created {agent_name} agent with {len(config['tools'])} tools")
-                
-            except Exception as e:
-                logger.error(f"Failed to create {agent_name} agent: {str(e)}")
-                # Create a fallback agent
-                try:
-                    fallback_agent = self.agent_manager.create_agent(
-                        name=agent_name,
-                        agent_type=agent_name,
-                        tools=[],
-                        model_name="llama3-8b-8192",
-                        temperature=0.7
-                    )
-                    self.base_agents[agent_name] = fallback_agent
-                except Exception as fallback_error:
-                    logger.error(f"Failed to create fallback {agent_name} agent: {str(fallback_error)}")
-                    # Skip this agent if both main and fallback creation fail
-                    continue
+        for agent_type, config in agent_configs:
+            self.base_agents[agent_type] = self.agent_manager.get_agent_class(agent_type)(config)
         
         logger.info(f"Initialized {len(self.base_agents)} base agents: {list(self.base_agents.keys())}")
         
-        # Initialize orchestrator with the agent manager and base agents
-        self.orchestrator = get_orchestrator(base_agents=self.base_agents)
-        if hasattr(self.orchestrator, 'agent_manager'):
-            self.orchestrator.agent_manager = self.agent_manager
+        # Store base_agents for lazy orchestrator initialization
+        self._base_agents = self.base_agents
+        self._orchestrator = None  # Lazy initialization
         
         # System personality and constraints
         self.personality = {
@@ -250,6 +220,17 @@ class NaaradAgent:
                 "In-depth analysis"
             ]
         }
+    
+    @property
+    def orchestrator(self):
+        """Lazy-load the orchestrator when needed."""
+        if self._orchestrator is None:
+            from .orchestrator import AgentOrchestrator
+            logger.info("Creating AgentOrchestrator singleton instance...")
+            self._orchestrator = AgentOrchestrator(base_agents=self._base_agents)
+            if hasattr(self._orchestrator, 'agent_manager'):
+                self._orchestrator.agent_manager = self.agent_manager
+        return self._orchestrator
     
     async def ensure_initialized(self):
         """Ensure the agent is properly initialized."""
@@ -580,5 +561,68 @@ class NaaradAgent:
                 'timestamp': datetime.utcnow().isoformat()
             }
 
-# Singleton instance
-naarad_agent = NaaradAgent()
+    async def process_with_streaming(
+        self,
+        message: str,
+        conversation_id: str = None,
+        user_id: str = None,
+        message_type: str = "text",
+        **kwargs
+    ):
+        """Process a message and stream the response back."""
+        try:
+            context = await self._get_or_create_context(conversation_id, user_id)
+            
+            # Get existing conversation
+            conversation = await self.memory_manager.get_conversation(
+                conversation_id=context.conversation_id,
+                user_id=context.user_id
+            )
+            messages = conversation.get('messages', []) if conversation else []
+
+            # Add user message to history
+            messages.append({
+                "role": "user",
+                "content": message,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+            # Save updated conversation
+            await self.memory_manager.save_conversation(
+                conversation_id=context.conversation_id,
+                user_id=context.user_id,
+                messages=messages,
+                metadata=context.metadata
+            )
+
+            full_response = ""
+            async for chunk in self.orchestrator.process_message_stream(
+                message, 
+                context.conversation_id,
+                context.user_id,
+                message_type,
+                **kwargs
+            ):
+                if isinstance(chunk, dict) and chunk.get("type") == "stream_chunk":
+                    full_response += chunk.get("chunk", "")
+                yield chunk
+
+            # Add final AI message to memory
+            messages.append({
+                "role": "assistant",
+                "content": full_response,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            await self.memory_manager.save_conversation(
+                conversation_id=context.conversation_id,
+                user_id=context.user_id,
+                messages=messages,
+                metadata=context.metadata
+            )
+
+        except Exception as e:
+            logger.error(f"Error in process_with_streaming: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": f"An unexpected error occurred: {str(e)}"
+            }

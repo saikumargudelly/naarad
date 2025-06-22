@@ -1,8 +1,8 @@
 from enum import Enum
 from typing import Optional, List, ClassVar, Union, Dict, Any
 from pathlib import Path
-from pydantic import Field, field_validator, model_validator, HttpUrl, AnyHttpUrl
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator, HttpUrl, AnyHttpUrl, ConfigDict
+from pydantic_settings import BaseSettings
 
 class Environment(str, Enum):
     """Application environment types."""
@@ -117,6 +117,12 @@ class Settings(BaseSettings):
         description="Cache time-to-live in seconds"
     )
     
+    # --- Debugging ---
+    debug_mode: bool = Field(
+        default=False,
+        description="Enable verbose debug logging for agents and LLMs"
+    )
+    
     # --- Validation ---
     @field_validator('ALLOWED_ORIGINS', mode='before')
     @classmethod
@@ -133,7 +139,7 @@ class Settings(BaseSettings):
         """Get allowed origins as a list of strings."""
         return [str(origin) for origin in self.ALLOWED_ORIGINS]
     
-    model_config = SettingsConfigDict(
+    model_config = ConfigDict(
         env_file=".env",
         env_file_encoding='utf-8',
         case_sensitive=True,

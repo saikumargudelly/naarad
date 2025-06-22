@@ -19,41 +19,35 @@ logger = logging.getLogger(__name__)
 class QualityAgent(BaseAgent):
     """Agent specialized in refining and improving responses for quality and clarity."""
     
-    def __init__(self, config: Union[AgentConfig, Dict[str, Any]]):
+    def __init__(self, config: Dict[str, Any]):
         """Initialize the quality agent with configuration.
         
         Args:
-            config: The configuration for the agent. Can be a dictionary or AgentConfig instance.
-                   If None, default values will be used.
+            config: The configuration for the agent. Must be a dictionary.
         """
-        if not isinstance(config, (AgentConfig, dict)):
-            raise ValueError("config must be an AgentConfig instance or a dictionary")
-            
-        if isinstance(config, dict):
-            # Set default values if not provided
-            default_config = {
-                'name': 'quality',
-                'description': 'Specialized in refining and improving responses for quality and clarity.',
-                'model_name': settings.REASONING_MODEL,
-                'temperature': 0.3,  # Lower temperature for more consistent, focused outputs
-                'system_prompt': """You are a quality assurance specialist. Your job is to review and improve responses 
-                for clarity, conciseness, accuracy, and tone. Ensure the response is well-structured, free of errors, 
-                and effectively addresses the user's query. Pay special attention to:
-                
-                1. Grammar and spelling
-                2. Logical flow and coherence
-                3. Accuracy of information
-                4. Tone and professionalism
-                5. Completeness of the response
-                
-                If the response needs significant improvement, rewrite it completely while preserving the core meaning.
-                If the response is already high quality, make only minor adjustments or return it as is.""",
-                'max_iterations': 2  # Fewer iterations for quality checking
-            }
-            # Update with any provided config values
-            default_config.update(config)
-            config = default_config
-            
+        # Set default values if not provided
+        default_config = {
+            'name': 'quality',
+            'description': 'Specialized in refining and improving responses for quality and clarity.',
+            'model_name': settings.REASONING_MODEL,
+            'temperature': 0.3,  # Lower temperature for more consistent, focused outputs
+            'system_prompt': """
+You are a quality assurance specialist. Your responsibilities are:
+
+1. Review and improve responses for clarity, conciseness, accuracy, tone, and professionalism.
+2. Ensure the improved response fully addresses the user's original query and preserves all relevant context from the conversation.
+3. Highlight and explain any major changes made to the original response, especially if you rewrite or significantly alter the content.
+4. If the response is already high quality, make only minor adjustments or return it as is.
+5. Never introduce factual errors or remove important context.
+6. If information is missing, ambiguous, or unclear, suggest clarifications or improvements.
+7. Always be transparent about any limitations or uncertainties in the improved response.
+
+Be objective, constructive, and ensure every response is actionable and easy to understand.
+""", 'max_iterations': 2  # Fewer iterations for quality checking
+        }
+        # Update with any provided config values
+        default_config.update(config)
+        config = default_config
         super().__init__(config)
     
     def _create_agent(self):
@@ -108,10 +102,8 @@ class QualityAgent(BaseAgent):
             Dict containing the improved response and metadata
         """
         try:
-            # Get the original query and response
             original_query = kwargs.pop('query', 'Unknown query')
             current_response = input_text.strip()
-            
             if not current_response:
                 return {
                     'output': '',
@@ -121,37 +113,24 @@ class QualityAgent(BaseAgent):
                         'success': False
                     }
                 }
-            
-            # Get the model configuration
             model_config = self.agent
-            
-            # Initialize the model here to avoid pickling issues
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage, SystemMessage
-            
             llm = ChatGroq(
                 temperature=model_config['temperature'],
                 model_name=model_config['model_name'],
                 groq_api_key=model_config['api_key']
             )
-            
-            # Format the prompt
             prompt = self._prompt_template.format(
                 query=original_query,
                 response=current_response
             )
-            
-            # Get the improved response
             messages = [
                 SystemMessage(content="You are a helpful assistant that improves response quality."),
                 HumanMessage(content=prompt)
             ]
             result = llm.invoke(messages)
-            
-            # Process the result
             improved_response = result.content.strip()
-            
-            # Check if no changes were needed
             if improved_response.upper() == 'NO_CHANGE':
                 return {
                     'output': current_response,
@@ -160,10 +139,13 @@ class QualityAgent(BaseAgent):
                         'success': True
                     }
                 }
-            
-            # Check if the response was actually improved
             is_improved = improved_response != current_response
-            
+            # Contextual follow-up if multiple suggestions/improvements
+            suggestions = improved_response.split('\n') if isinstance(improved_response, str) else []
+            followup = ''
+            if len(suggestions) > 4:
+                followup = self._contextual_followup(original_query, suggestions, domain='quality')
+                improved_response += f"\n\n{followup}"
             return {
                 'output': improved_response,
                 'metadata': {
@@ -171,7 +153,6 @@ class QualityAgent(BaseAgent):
                     'success': True
                 }
             }
-            
         except Exception as e:
             logger.error(f"Error in quality check: {str(e)}", exc_info=True)
             return {

@@ -3,6 +3,7 @@
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 class LLMSettings(BaseSettings):
     """LLM-specific settings."""
@@ -99,8 +100,9 @@ class LLMSettings(BaseSettings):
         description="Time window for rate limiting in seconds"
     )
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = 'utf-8'
-        case_sensitive = True
-        extra = 'ignore' 
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        case_sensitive=True,
+        extra='ignore',
+    ) 

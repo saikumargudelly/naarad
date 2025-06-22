@@ -185,6 +185,22 @@ class AgentRequestTracker:
             )
         
         return False  # Don't suppress exceptions
+    
+    def success(self):
+        """Mark the request as successful."""
+        processing_time = time.time() - self.start_time
+        self.monitor.record_success(self.agent_name, processing_time)
+    
+    def error(self, exception: Exception):
+        """Mark the request as failed with an error."""
+        processing_time = time.time() - self.start_time
+        error_type = type(exception).__name__
+        error_message = str(exception)
+        self.monitor.record_error(
+            self.agent_name,
+            error_type=error_type,
+            error_message=error_message
+        )
 
 # Global monitor instance
 agent_monitor = AgentMonitor(enable_metrics=True)

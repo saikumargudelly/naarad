@@ -22,6 +22,11 @@ class Intent(Enum):
     REMINDER = "reminder"
     CALCULATION = "calculation"
     UNKNOWN = "unknown"
+    EMOTION = "emotion"
+    CREATIVITY = "creativity"
+    PREDICTION = "prediction"
+    LEARNING = "learning"
+    QUANTUM = "quantum"
 
 @dataclass
 class Entity:
@@ -84,6 +89,32 @@ class EnhancedRouter:
             Intent.GREETING: [
                 (re.compile(r'^(?:hello|hi|hey|greetings|good\s+(?:morning|afternoon|evening))\b', re.IGNORECASE), 1.0),
                 (re.compile(r'^how\s+(?:are\s+you|do\s+you\s+do|is\s+it\s+going)', re.IGNORECASE), 0.9),
+            ],
+            # New futuristic intent patterns
+            Intent.EMOTION: [
+                (re.compile(r'\b(?:how\s+do\s+i\s+feel|what\s+emotion|detect\s+emotion|emotional|mood|feeling)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(?:sad|happy|angry|excited|worried|frustrated|joy|sorrow|fear|surprise)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(?:emotionally|empathy|compassion|understanding|support)\b', re.IGNORECASE), 0.8),
+            ],
+            Intent.CREATIVITY: [
+                (re.compile(r'\b(?:creative|brainstorm|ideas|innovative|imaginative|artistic|design|invent)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(?:story|narrative|plot|character|fiction|creative\s+writing)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(?:inspiration|inspire|creative\s+thinking|out\s+of\s+the\s+box)\b', re.IGNORECASE), 0.8),
+            ],
+            Intent.PREDICTION: [
+                (re.compile(r'\b(?:predict|forecast|future|trend|pattern|what\s+will\s+happen|outcome)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(?:analysis|predictive|forecasting|trend\s+analysis|pattern\s+recognition)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(?:risk|opportunity|scenario|possibility|probability|chance)\b', re.IGNORECASE), 0.8),
+            ],
+            Intent.LEARNING: [
+                (re.compile(r'\b(?:learn|improve|adapt|feedback|better|optimize|enhance|refine)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(?:performance|efficiency|accuracy|quality|satisfaction|user\s+preference)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(?:learning|adaptation|improvement|optimization|enhancement)\b', re.IGNORECASE), 0.8),
+            ],
+            Intent.QUANTUM: [
+                (re.compile(r'\b(?:quantum|superposition|entanglement|tunneling|quantum\s+computing)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(?:quantum\s+algorithm|grover|shor|quantum\s+cryptography|qubit)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(?:quantum\s+inspired|quantum\s+thinking|quantum\s+approach)\b', re.IGNORECASE), 0.8),
             ],
             Intent.GENERAL: [
                 (re.compile(r'^$'), 1.0),

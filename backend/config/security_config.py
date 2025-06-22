@@ -1,7 +1,7 @@
 """Security configuration settings."""
 
 from typing import List, Union
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, ConfigDict
 from pydantic_settings import BaseSettings
 from pydantic.networks import HttpUrl
 
@@ -16,7 +16,7 @@ class SecuritySettings(BaseSettings):
     )
     
     # CORS Settings
-    BACKEND_CORS_ORIGINS: List[Union[HttpUrl, str]] = Field(
+    BACKEND_CORS_ORIGINS: Union[str, List[str]] = Field(
         default=[
             "http://localhost:3000",
             "http://localhost:8000",
@@ -28,12 +28,23 @@ class SecuritySettings(BaseSettings):
     
     @field_validator("BACKEND_CORS_ORIGINS")
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        """Parse CORS origins from string or list."""
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
+        """Parse CORS origins from string or list, and handle '*' for all origins."""
+        if isinstance(v, str):
+            if v.strip() == "*":
+                return ["*"]
+            if v.startswith("["):
+                # Handle JSON array format
+                import json
+                try:
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    raise ValueError(f"Invalid JSON format for BACKEND_CORS_ORIGINS: {v}")
+            else:
+                # Handle comma-separated string format
+                return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, list):
             return v
-        raise ValueError(v)
+        raise ValueError(f"Invalid format for BACKEND_CORS_ORIGINS: {v}")
     
     # Authentication settings
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
@@ -112,8 +123,9 @@ class SecuritySettings(BaseSettings):
         description="Enable API key authentication"
     )
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = 'utf-8'
-        case_sensitive = True
-        extra = 'ignore' 
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        case_sensitive=True,
+        extra='ignore',
+    ) 

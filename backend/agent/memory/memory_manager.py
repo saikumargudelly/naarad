@@ -7,8 +7,20 @@ from sqlalchemy.orm import sessionmaker
 import json
 import os
 import asyncio
+import logging
 from functools import wraps
 from llm.config import settings
+
+# Set up logger
+logger = logging.getLogger(__name__)
+
+# Import Supabase client
+try:
+    from .supabase_client import supabase_client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    supabase_client = None
 
 # Type variable for generic return type
 T = TypeVar('T')
@@ -52,6 +64,13 @@ class MemoryManager:
         # Don't initialize DB here, will be done on first use
         self._initialized = False
         
+        # Initialize Supabase if available
+        self.supabase_enabled = SUPABASE_AVAILABLE and supabase_client and supabase_client.is_enabled()
+        if self.supabase_enabled:
+            logger.info("Supabase integration enabled")
+        else:
+            logger.info("Supabase integration disabled - using SQLite only")
+        
     async def ensure_initialized(self):
         """Ensure the database is initialized."""
         if not self._initialized:
@@ -64,7 +83,18 @@ class MemoryManager:
             await conn.run_sync(Base.metadata.create_all)
     
     async def get_conversation(self, conversation_id: str, user_id: str = "default") -> Optional[Dict]:
-        """Retrieve a conversation by ID."""
+        """Retrieve a conversation by ID with Supabase fallback."""
+        # Try Supabase first if enabled
+        if self.supabase_enabled:
+            try:
+                supabase_result = await supabase_client.get_conversation(conversation_id, user_id)
+                if supabase_result:
+                    logger.debug(f"Retrieved conversation {conversation_id} from Supabase")
+                    return supabase_result
+            except Exception as e:
+                logger.warning(f"Supabase retrieval failed, falling back to SQLite: {e}")
+        
+        # Fallback to SQLite
         await self.ensure_initialized()
         async with self.async_session() as session:
             result = await session.execute(
@@ -95,7 +125,20 @@ class MemoryManager:
         metadata: Optional[Dict] = None,
         agent_states: Optional[Dict] = None
     ) -> Dict:
-        """Save or update a conversation."""
+        """Save or update a conversation with dual storage (Supabase + SQLite)."""
+        # Save to Supabase if enabled
+        supabase_result = None
+        if self.supabase_enabled:
+            try:
+                supabase_result = await supabase_client.save_conversation(
+                    conversation_id, messages, user_id, metadata, agent_states
+                )
+                if supabase_result:
+                    logger.debug(f"Saved conversation {conversation_id} to Supabase")
+            except Exception as e:
+                logger.warning(f"Supabase save failed: {e}")
+        
+        # Always save to SQLite as backup
         await self.ensure_initialized()
         memory_id = f"{user_id}_{conversation_id}"
         
@@ -128,7 +171,7 @@ class MemoryManager:
             await session.commit()
             await session.refresh(memory)
             
-            return {
+            sqlite_result = {
                 'id': memory.id,
                 'user_id': memory.user_id,
                 'conversation_id': memory.conversation_id,
@@ -136,6 +179,80 @@ class MemoryManager:
                 'metadata': memory.metadata_ or {},
                 'agent_states': memory.agent_states or {}
             }
+        
+        # Return Supabase result if available, otherwise SQLite result
+        return supabase_result if supabase_result else sqlite_result
+    
+    async def delete_conversation(self, conversation_id: str, user_id: str = "default") -> bool:
+        """Delete a conversation from both Supabase and SQLite."""
+        success = True
+        
+        # Delete from Supabase if enabled
+        if self.supabase_enabled:
+            try:
+                supabase_success = await supabase_client.delete_conversation(conversation_id, user_id)
+                if supabase_success:
+                    logger.debug(f"Deleted conversation {conversation_id} from Supabase")
+                else:
+                    logger.warning(f"Failed to delete conversation {conversation_id} from Supabase")
+                    success = False
+            except Exception as e:
+                logger.warning(f"Supabase deletion failed: {e}")
+                success = False
+        
+        # Delete from SQLite
+        await self.ensure_initialized()
+        memory_id = f"{user_id}_{conversation_id}"
+        
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(ConversationMemory)
+                .where(ConversationMemory.id == memory_id)
+            )
+            memory = result.scalars().first()
+            
+            if memory:
+                await session.delete(memory)
+                await session.commit()
+                logger.debug(f"Deleted conversation {conversation_id} from SQLite")
+            else:
+                logger.warning(f"Conversation {conversation_id} not found in SQLite")
+                success = False
+        
+        return success
+    
+    async def list_conversations(self, user_id: str = "default", limit: int = 50) -> List[Dict[str, Any]]:
+        """List conversations for a user, preferring Supabase if available."""
+        if self.supabase_enabled:
+            try:
+                supabase_conversations = await supabase_client.list_conversations(user_id, limit)
+                if supabase_conversations:
+                    logger.debug(f"Retrieved {len(supabase_conversations)} conversations from Supabase")
+                    return supabase_conversations
+            except Exception as e:
+                logger.warning(f"Supabase list failed, falling back to SQLite: {e}")
+        
+        # Fallback to SQLite
+        await self.ensure_initialized()
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(ConversationMemory)
+                .where(ConversationMemory.user_id == user_id)
+                .order_by(ConversationMemory.updated_at.desc())
+                .limit(limit)
+            )
+            memories = result.scalars().all()
+            
+            return [
+                {
+                    'id': memory.id,
+                    'conversation_id': memory.conversation_id,
+                    'metadata': memory.metadata_ or {},
+                    'created_at': memory.created_at.isoformat() if memory.created_at else None,
+                    'updated_at': memory.updated_at.isoformat() if memory.updated_at else None
+                }
+                for memory in memories
+            ]
     
     def update_agent_state(
         self,

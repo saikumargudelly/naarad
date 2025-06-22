@@ -73,7 +73,7 @@ Send a message to the AI assistant and receive a response.
     "conversation_id": "conv_abc123",
     "metadata": {
       "agent_used": "responder",
-      "model": "mixtral-8x7b-32768",
+      "model": "llama3-70b-8192",
       "processing_time": "1.23s"
     }
   },

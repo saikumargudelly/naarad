@@ -41,37 +41,14 @@ def create_agent(agent_type: str, **kwargs) -> BaseAgent:
         raise ValueError(f"Unknown agent type: {agent_type}")
     
     try:
-        # Dynamically import the agent class
         module_path, class_name = agent_path.rsplit('.', 1)
         module = importlib.import_module(module_path, package='agent')
         agent_class = getattr(module, class_name)
-        
-        # Prepare configuration for the agent
-        config = {}
-        
-        # Handle tools parameter properly
-        if 'tools' in kwargs:
-            config['tools'] = kwargs.pop('tools')
-        
-        # Handle other configuration parameters
-        for key, value in kwargs.items():
-            if key in ['name', 'description', 'model_name', 'temperature', 'system_prompt', 'max_iterations', 'verbose']:
-                config[key] = value
-        
-        # Set default values if not provided
-        if 'name' not in config:
-            config['name'] = agent_type
-        if 'description' not in config:
-            config['description'] = f'{agent_type.capitalize()} agent for {agent_type} tasks'
-        
-        # Create and return the agent instance with proper configuration
+        # Always pass config as dict
+        config = kwargs if kwargs else {}
         return agent_class(config=config)
-        
-    except (ImportError, AttributeError) as e:
-        logger.error(f"Failed to import agent class for {agent_type}: {str(e)}")
-        raise ValueError(f"Failed to import agent class for {agent_type}: {str(e)}") from e
     except Exception as e:
-        logger.error(f"Failed to create {agent_type} agent: {str(e)}", exc_info=True)
+        logger.error(f"Failed to create {agent_type} agent: {str(e)}")
         raise ValueError(f"Failed to create {agent_type} agent: {str(e)}") from e
 
 def create_default_agents() -> Dict[str, BaseAgent]:
@@ -85,11 +62,10 @@ def create_default_agents() -> Dict[str, BaseAgent]:
     
     for agent_type in agent_types:
         try:
-            agents[agent_type] = create_agent(agent_type)
+            agents[agent_type] = create_agent(agent_type)  # No AgentConfig, just dict
             logger.info(f"Successfully created {agent_type} agent")
         except Exception as e:
             logger.error(f"Failed to create {agent_type} agent: {str(e)}", exc_info=True)
-            # Continue with other agents even if one fails
             continue
     
     if not agents:
