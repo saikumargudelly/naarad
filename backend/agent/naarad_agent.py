@@ -71,37 +71,8 @@ def get_orchestrator(base_agents=None):
     return _orchestrator
 
 def get_base_agents():
-    global _base_agents
-    if _base_agents is None:
-        from .agents import (
-            ResearcherAgent,
-            AnalystAgent,
-            ResponderAgent,
-            QualityAgent
-        )
-        from langchain_core.language_models import BaseChatModel
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        
-        # Create the agent using ZeroShotAgent
-        llm = BaseChatModel.from_model_name("llama-7b")
-        prompt = ChatPromptTemplate.from_template(
-            "You are a {agent_name} agent. Please respond accordingly.",
-            agent_name=MessagesPlaceholder()
-        )
-        agent = ZeroShotAgent.from_llm_and_tools(
-            llm=llm,
-            tools=[LLaVAVisionTool(), BraveSearchTool()],
-            prompt=prompt
-        )
-        
-        _base_agents = {
-            'researcher': ResearcherAgent,
-            'analyst': AnalystAgent,
-            'responder': ResponderAgent,
-            'quality': QualityAgent,
-            'create_base_agents': create_base_agents
-        }
-    return _base_agents
+    """Legacy function removed: Use NaaradAgent class for all agent instantiation."""
+    raise NotImplementedError("get_base_agents() is deprecated. Use NaaradAgent class instead.")
 
 class ConversationContext(BaseModel):
     """Represents the context for a conversation."""
@@ -186,10 +157,10 @@ class NaaradAgent:
         
         # Agent configurations with their tools
         agent_configs = [
-            ('responder', {'tools': responder_tools}),
-            ('researcher', {'tools': research_tools}),
-            ('analyst', {'tools': analysis_tools}),
-            ('quality', {'tools': quality_tools})
+            ('responder', {'tools': responder_tools, 'model_name': settings.CHAT_MODEL}),
+            ('researcher', {'tools': research_tools, 'model_name': settings.REASONING_MODEL}),
+            ('analyst', {'tools': analysis_tools, 'model_name': settings.REASONING_MODEL}),
+            ('quality', {'tools': quality_tools, 'model_name': settings.REASONING_MODEL})
         ]
         for agent_type, config in agent_configs:
             self.base_agents[agent_type] = self.agent_manager.get_agent_class(agent_type)(config)

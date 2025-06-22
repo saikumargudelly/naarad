@@ -25,7 +25,7 @@ class QualityAgent(BaseAgent):
         Args:
             config: The configuration for the agent. Must be a dictionary.
         """
-        # Set default values if not provided
+        # Always define system_prompt first
         routing_info = config.get('routing_info', {}) if isinstance(config, dict) else {}
         intent = routing_info.get('intent', 'unknown')
         confidence = routing_info.get('confidence', None)
@@ -47,6 +47,7 @@ Be objective, constructive, and ensure every response is actionable and easy to 
 
 If the query is outside your quality domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
 """
+        # Set default values if not provided
         default_config = {
             'name': 'quality',
             'description': 'Specialized in refining and improving responses for quality and clarity.',

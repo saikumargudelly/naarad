@@ -24,11 +24,11 @@ class LLMSettings(BaseSettings):
     
     # Model Configuration
     DEFAULT_MODEL: str = Field(
-        default="mistralai/Mixtral-8x7B-Instruct-v0.1",
+        default="llama3-70b-8192",
         description="Default model to use for general tasks"
     )
     CHAT_MODEL: str = Field(
-        default="nousresearch/nous-hermes-2-mixtral-8x7b-dpo",
+        default="llama3-70b-8192",
         description="Model to use for chat interactions"
     )
     EMBEDDING_MODEL: str = Field(

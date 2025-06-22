@@ -39,9 +39,8 @@ class AnalystAgent(BaseAgent):
             intent = routing_info.get('intent', 'unknown')
             confidence = routing_info.get('confidence', None)
             entities = routing_info.get('entities', {})
-            # Format routing info for prompt
             routing_str = f"\n[Routing Info]\nIntent: {intent} (confidence: {confidence})\nEntities: {entities}\n" if intent != 'unknown' else ''
-            # Enhanced system prompt
+            # Always define system_prompt first
             system_prompt = f"""
 {routing_str}
 You are an expert analytical assistant. Your responsibilities are:
@@ -57,21 +56,19 @@ You are an expert analytical assistant. Your responsibilities are:
 
 If the query is outside your analytical domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
 """
-            
+            default_config = {
+                'name': 'analyst',
+                'description': 'Specialized in analyzing information and providing insights.',
+                'model_name': settings.REASONING_MODEL,
+                'temperature': 0.5,
+                'system_prompt': system_prompt,
+                'max_iterations': 5
+            }
             # If no tools are provided, use a dummy tool
             if 'tools' not in config or not config['tools']:
                 from ..tools.dummy_tool import DummyTool
-                default_config = {
-                    'name': 'analyst',
-                    'description': 'Specialized in analyzing information and providing insights.',
-                    'model_name': settings.REASONING_MODEL,
-                    'temperature': 0.5,
-                    'system_prompt': system_prompt,
-                    'max_iterations': 5
-                }
                 default_config['tools'] = [DummyTool()]
-            
-            # Update with any provided config values
+            # Now update with any provided config values
             default_config.update(config)
             config = default_config
             

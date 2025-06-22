@@ -123,8 +123,8 @@ BRAVE_API_KEY=your_brave_search_api_key_here
 LLM_PROVIDER=groq
 
 # Model Names
-REASONING_MODEL=mixtral-8x7b-instruct-v0.1
-CHAT_MODEL=mixtral-8x7b-instruct-v0.1
+REASONING_MODEL=llama3-70b-8192
+CHAT_MODEL=llama3-70b-8192
 VISION_MODEL=llava-1.5-7b
 EMBEDDING_MODEL=text-embedding-3-small
 

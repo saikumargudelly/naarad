@@ -190,27 +190,27 @@ QUANTUM_AGENT_ENABLED=true
 FUTURISTIC_AGENTS = {
     'emotion_agent': {
         'enabled': True,
-        'model': 'mixtral-8x7b-instruct-v0.1',
+        'model': 'llama3-70b-8192',
         'temperature': 0.7
     },
     'creativity_agent': {
         'enabled': True,
-        'model': 'mixtral-8x7b-instruct-v0.1',
+        'model': 'llama3-70b-8192',
         'temperature': 0.8
     },
     'prediction_agent': {
         'enabled': True,
-        'model': 'mixtral-8x7b-instruct-v0.1',
+        'model': 'llama3-70b-8192',
         'temperature': 0.3
     },
     'learning_agent': {
         'enabled': True,
-        'model': 'mixtral-8x7b-instruct-v0.1',
+        'model': 'llama3-70b-8192',
         'temperature': 0.5
     },
     'quantum_agent': {
         'enabled': True,
-        'model': 'mixtral-8x7b-instruct-v0.1',
+        'model': 'llama3-70b-8192',
         'temperature': 0.6
     }
 }

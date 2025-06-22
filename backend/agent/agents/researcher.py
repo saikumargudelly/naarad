@@ -78,7 +78,7 @@ Be thorough, objective, and always cite your sources. For all queries about curr
 If the query is outside your research domain or the intent confidence is low, escalate to the appropriate agent or ask the user for clarification before proceeding. If you cannot help, say so and suggest the correct agent or next step.
 """
             
-            # Set default values if not provided
+            # Always define default_config first
             default_config = {
                 'name': 'researcher',
                 'description': 'Specialized in finding and gathering information from various sources.',
@@ -87,7 +87,23 @@ If the query is outside your research domain or the intent confidence is low, es
                 'system_prompt': system_prompt,
                 'max_iterations': 5  # Allow for multiple search iterations
             }
-            # Update with any provided config values
+            # Initialize tools list
+            agent_tools = []
+            # Try to import and initialize BraveSearchTool if API key is available
+            if os.getenv('BRAVE_API_KEY'):
+                try:
+                    from ..tools.brave_search import BraveSearchTool
+                    agent_tools.append(BraveSearchTool())
+                except ImportError as e:
+                    logger.warning(f"Failed to load BraveSearchTool: {e}")
+            else:
+                logger.warning("BRAVE_API_KEY not found. Brave search functionality will be disabled.")
+            # If no tools were added, add a dummy tool
+            if not agent_tools:
+                from ..tools.dummy_tool import DummyTool
+                agent_tools.append(DummyTool())
+            default_config['tools'] = agent_tools
+            # Now update with any provided config values
             default_config.update(config)
             config = default_config
             
@@ -109,30 +125,6 @@ If the query is outside your research domain or the intent confidence is low, es
             missing_str = ", ".join(missing_apis)
             system_prompt += f"\n\nNOTE: The following services are not available: {missing_str}. "
             system_prompt += "Some features may be limited. Please check your API configuration."
-        
-        # Initialize tools list
-        agent_tools = []
-        
-        # Try to import and initialize BraveSearchTool if API key is available
-        if os.getenv('BRAVE_API_KEY'):
-            try:
-                from ..tools.brave_search import BraveSearchTool
-                agent_tools.append(BraveSearchTool())
-            except ImportError as e:
-                logger.warning(f"Failed to load BraveSearchTool: {e}")
-        else:
-            logger.warning("BRAVE_API_KEY not found. Brave search functionality will be disabled.")
-        
-        # If no tools were added, add a dummy tool
-        if not agent_tools:
-            from ..tools.dummy_tool import DummyTool
-            agent_tools.append(DummyTool())
-            
-        # Update the config with tools
-        if isinstance(config, dict):
-            config['tools'] = agent_tools
-        else:
-            config.tools = agent_tools
         
         # Initialize logging and metrics
         self.search_count = 0

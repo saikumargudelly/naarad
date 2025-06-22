@@ -149,3 +149,4 @@ class Settings(BaseSettings):
     )
 
 settings = Settings()
+print(f"DEBUG: settings.CHAT_MODEL={settings.CHAT_MODEL}, settings.REASONING_MODEL={settings.REASONING_MODEL}")

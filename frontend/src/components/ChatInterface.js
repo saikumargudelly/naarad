@@ -387,7 +387,7 @@ const ChatInterface = () => {
         )}
 
         {/* Chat Area */}
-        <div className="chat-area">
+        <div className="chat-area flex-1 overflow-y-auto">
           <MessageList 
             messages={messages} 
             isLoading={isLoading}
@@ -533,7 +533,7 @@ const ChatInterface = () => {
           flex: 1;
           display: flex;
           flex-direction: column;
-          overflow: hidden;
+          overflow-y: auto;
         }
 
         .voice-panel {

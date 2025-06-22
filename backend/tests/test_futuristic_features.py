@@ -34,7 +34,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_emotion_agent",
                 description="Test emotion agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = EmotionAgent(config)
@@ -52,7 +52,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_creativity_agent",
                 description="Test creativity agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = CreativityAgent(config)
@@ -70,7 +70,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_prediction_agent",
                 description="Test prediction agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = PredictionAgent(config)
@@ -88,7 +88,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_learning_agent",
                 description="Test learning agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = LearningAgent(config)
@@ -106,7 +106,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_quantum_agent",
                 description="Test quantum agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = QuantumAgent(config)
@@ -210,7 +210,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_emotion_agent",
                 description="Test emotion agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = EmotionAgent(config)
@@ -235,7 +235,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_creativity_agent",
                 description="Test creativity agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = CreativityAgent(config)
@@ -260,7 +260,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_prediction_agent",
                 description="Test prediction agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = PredictionAgent(config)
@@ -285,7 +285,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_learning_agent",
                 description="Test learning agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = LearningAgent(config)
@@ -310,7 +310,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_quantum_agent",
                 description="Test quantum agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = QuantumAgent(config)
@@ -400,7 +400,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_emotion_agent",
                 description="Test emotion agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = EmotionAgent(config)
@@ -437,7 +437,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_creativity_agent",
                 description="Test creativity agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = CreativityAgent(config)
@@ -465,7 +465,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_prediction_agent",
                 description="Test prediction agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = PredictionAgent(config)
@@ -493,7 +493,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_learning_agent",
                 description="Test learning agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = LearningAgent(config)
@@ -521,7 +521,7 @@ class TestFuturisticFeatures:
             config = AgentConfig(
                 name="test_quantum_agent",
                 description="Test quantum agent",
-                model_name="mixtral-8x7b-instruct-v0.1"
+                model_name="llama3-70b-8192"
             )
             
             agent = QuantumAgent(config)

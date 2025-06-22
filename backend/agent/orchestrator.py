@@ -135,6 +135,133 @@ class AgentOrchestrator:
                 'timestamp': datetime.datetime.utcnow().isoformat()
             })
             context['trace'] = trace
+            # --- Multi-agent collaboration logic ---
+            collaborative_agents = []
+            multi_agent = False
+            # Check for multiple strong intents (alternatives with high confidence)
+            alternatives = getattr(intent_match, 'alternatives', [])
+            strong_alts = [alt for alt in alternatives if alt[1] > 0.7 and alt[0] != intent_match.intent]
+            # Also check for multi-domain keywords (e.g., both "analyze" and "predict" in input)
+            multi_domain_keywords = [
+                ('analyze', 'predict'),
+                ('research', 'analyze'),
+                ('emotion', 'quality'),
+                ('summarize', 'personalize'),
+                # Expanded pairs for more robust multi-agent collaboration:
+                ('summarize', 'analyze'),
+                ('summarize', 'predict'),
+                ('summarize', 'quality'),
+                ('summarize', 'emotion'),
+                ('summarize', 'personalize'),
+                ('analyze', 'quality'),
+                ('analyze', 'emotion'),
+                ('analyze', 'research'),
+                ('analyze', 'forecast'),
+                ('analyze', 'trend'),
+                ('analyze', 'classify'),
+                ('predict', 'trend'),
+                ('predict', 'quality'),
+                ('predict', 'personalize'),
+                ('predict', 'summarize'),
+                ('predict', 'analyze'),
+                ('predict', 'research'),
+                ('predict', 'emotion'),
+                ('quality', 'emotion'),
+                ('quality', 'personalize'),
+                ('quality', 'summarize'),
+                ('quality', 'analyze'),
+                ('quality', 'predict'),
+                ('personalize', 'summarize'),
+                ('personalize', 'analyze'),
+                ('personalize', 'predict'),
+                ('personalize', 'quality'),
+                ('personalize', 'emotion'),
+                ('emotion', 'summarize'),
+                ('emotion', 'analyze'),
+                ('emotion', 'predict'),
+                ('emotion', 'quality'),
+                ('emotion', 'personalize'),
+                ('compare', 'analyze'),
+                ('compare', 'summarize'),
+                ('compare', 'predict'),
+                ('compare', 'quality'),
+                ('compare', 'emotion'),
+                ('compare', 'personalize'),
+                ('trend', 'forecast'),
+                ('trend', 'analyze'),
+                ('trend', 'predict'),
+                ('trend', 'summarize'),
+                ('trend', 'quality'),
+                ('trend', 'personalize'),
+                ('trend', 'emotion'),
+                ('forecast', 'analyze'),
+                ('forecast', 'predict'),
+                ('forecast', 'summarize'),
+                ('forecast', 'quality'),
+                ('forecast', 'personalize'),
+                ('forecast', 'emotion'),
+                # Add more as needed for new agent types or cross-domain queries
+            ]
+            user_input_lower = user_input.lower()
+            for kw1, kw2 in multi_domain_keywords:
+                if kw1 in user_input_lower and kw2 in user_input_lower:
+                    multi_agent = True
+                    break
+            if strong_alts:
+                multi_agent = True
+            if multi_agent:
+                # Determine all relevant agents
+                agent_names = set([await self._select_agent_by_intent(intent, context)])
+                for alt_intent, alt_conf in strong_alts:
+                    alt_intent_str = alt_intent.value if hasattr(alt_intent, 'value') else str(alt_intent)
+                    agent_names.add(await self._select_agent_by_intent(alt_intent_str, context))
+                # Remove duplicates and responder (unless only fallback)
+                agent_names = [a for a in agent_names if a != 'responder'] or ['responder']
+                collaborative_agents = list(agent_names)
+                # Collect all agent responses in parallel
+                agent_tasks = [
+                    self._route_to_agent(
+                        agent_name=agent_name,
+                        user_input=user_input,
+                        context={**context, 'collaboration_role': agent_name},
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        supporting_agents=[]
+                    )
+                    for agent_name in collaborative_agents
+                ]
+                agent_results = await asyncio.gather(*agent_tasks, return_exceptions=True)
+                merged_output = ""
+                merge_trace = []
+                for agent_name, result in zip(collaborative_agents, agent_results):
+                    if isinstance(result, Exception):
+                        out = f"Error from {agent_name}: {str(result)}"
+                    else:
+                        out = result.get('output', f"No response from {agent_name}")
+                    merged_output += f"\n\n--- [{agent_name.upper()} RESPONSE] ---\n{out.strip()}"
+                    merge_trace.append({'step': 'agent_response', 'agent': agent_name, 'output': out, 'timestamp': datetime.datetime.utcnow().isoformat()})
+                # Optionally, add a summary (could use a summarizer agent)
+                merged_output = merged_output.strip()
+                context['trace'].extend(merge_trace)
+                context['trace'].append({'step': 'merge', 'agents': collaborative_agents, 'timestamp': datetime.datetime.utcnow().isoformat()})
+                # After agent response is generated, post-process it
+                if 'output' in result and isinstance(result['output'], str):
+                    result['output'] = self._post_process_response(result['output'])
+                return {
+                    'success': True,
+                    'output': merged_output,
+                    'agent_used': '+'.join(collaborative_agents),
+                    'metadata': {
+                        'processing_time_seconds': 0,  # Could sum agent times if needed
+                        'intent': intent,
+                        'confidence': confidence,
+                        'entities': entities,
+                        'trace': context['trace'],
+                        'collaborative_agents': collaborative_agents
+                    }
+                }
+            # --- Single-agent logic (as before) ---
+            # Metrics, fallback, etc. remain unchanged
             # --- Metrics: intent distribution, ambiguous queries, etc. ---
             if self.metrics:
                 self.metrics.record_intent(intent, confidence)
@@ -157,6 +284,9 @@ class AgentOrchestrator:
                         conversation_id=conversation_id,
                         user_id=user_id
                     )
+                    # After agent response is generated, post-process it
+                    if 'output' in response and isinstance(response['output'], str):
+                        response['output'] = self._post_process_response(response['output'])
                     return {
                         'success': False,
                         'output': response.get('output', clarification),
@@ -170,6 +300,9 @@ class AgentOrchestrator:
                         }
                     }
                 else:
+                    # After agent response is generated, post-process it
+                    if 'output' in response and isinstance(response['output'], str):
+                        response['output'] = self._post_process_response(response['output'])
                     return {
                         'success': False,
                         'output': clarification,
@@ -217,6 +350,9 @@ class AgentOrchestrator:
             if self.metrics:
                 self.metrics.record_agent_result(agent_name, response.get('success', False))
             
+            # After agent response is generated, post-process it
+            if 'output' in response and isinstance(response['output'], str):
+                response['output'] = self._post_process_response(response['output'])
             return {
                 'success': response.get('success', True),
                 'output': response.get('output', ''),
@@ -255,33 +391,50 @@ class AgentOrchestrator:
     ):
         """Process a message and stream the response back."""
         try:
-            # 1. Select agent
-            agent_decision = await self._select_agent(
-                user_input=user_input,
-                context=kwargs,
-                conversation_id=conversation_id,
-                user_id=user_id
-            )
-            primary_agent = agent_decision['primary_agent']
-
+            # --- New intent classification and agent selection logic ---
+            from .enhanced_router import EnhancedRouter
+            router = self.router or EnhancedRouter()
+            context = kwargs or {}
+            intent_match = await router.classify_intent(user_input, context)
+            intent = intent_match.intent.value if hasattr(intent_match.intent, 'value') else str(intent_match.intent)
+            confidence = intent_match.confidence
+            entities = {k: v.value for k, v in intent_match.entities.items()}
+            # Standardize context keys
+            context['routing_info'] = {
+                'intent': intent,
+                'confidence': confidence,
+                'entities': entities,
+                'raw_intent_match': intent_match
+            }
+            context['entities'] = entities
+            trace = context.get('trace', [])
+            trace.append({
+                'step': 'intent_classification',
+                'intent': intent,
+                'confidence': confidence,
+                'entities': entities,
+                'timestamp': datetime.datetime.utcnow().isoformat()
+            })
+            context['trace'] = trace
+            primary_agent = await self._select_agent_by_intent(intent, context)
+            context['trace'].append({'step': 'agent_selection', 'agent': primary_agent, 'timestamp': datetime.datetime.utcnow().isoformat()})
             # Yield typing start indicator
             yield {"type": "typing_start", "agent": primary_agent}
-
             # 2. Route to the appropriate agent's streaming method if it exists
             if primary_agent in self.domain_agents and hasattr(self.domain_agents[primary_agent], 'process_stream'):
                 agent = self.domain_agents[primary_agent]
-                async for chunk in agent.process_stream(user_input, kwargs, conversation_id, user_id):
+                async for chunk in agent.process_stream(user_input, context, conversation_id, user_id):
                     yield chunk
             elif primary_agent in self.base_agents and hasattr(self.base_agents[primary_agent], 'process_stream'):
                 agent = self.base_agents[primary_agent]
-                async for chunk in agent.process_stream(user_input, kwargs, conversation_id, user_id):
+                async for chunk in agent.process_stream(user_input, context, conversation_id, user_id):
                     yield chunk
             else:
                 # Fallback to non-streaming for agents that don't support it
                 response = await self._route_to_agent(
                     agent_name=primary_agent,
                     user_input=user_input,
-                    context=kwargs,
+                    context=context,
                     conversation_id=conversation_id,
                     user_id=user_id
                 )
@@ -290,7 +443,9 @@ class AgentOrchestrator:
                     "content": response.get('output', 'No response generated.'),
                     "agent": primary_agent
                 }
-
+            # After agent response is generated, post-process it
+            if 'output' in response and isinstance(response['output'], str):
+                response['output'] = self._post_process_response(response['output'])
         except Exception as e:
             logger.error(f"Error in process_message_stream: {str(e)}", exc_info=True)
             yield {
@@ -656,6 +811,11 @@ class AgentOrchestrator:
                 output = self._remove_duplicate_words(output)
                 followup = self._remove_duplicate_words(followup)
                 output += followup
+                # --- LLM-based relevance extraction for Brave Search output ---
+                try:
+                    output = await self._extract_relevant_text_with_llm(user_input, output)
+                except Exception as e:
+                    logger.warning(f"LLM relevance extraction failed: {e}")
                 return {
                     'success': True,
                     'output': output,
@@ -1186,5 +1346,56 @@ class AgentOrchestrator:
                     'error_type': type(e).__name__
                 }
             }
+
+    def _post_process_response(self, response: str) -> str:
+        """Clean and format agent responses for professionalism and clarity."""
+        if not isinstance(response, str):
+            return response
+        # List of unwanted phrases or patterns to remove
+        unwanted_phrases = [
+            "View this free webinar from WebMD.",
+            "But that changed because of concerns that chemicals in butterbur supplements may cause serious liver damage.",
+            "... View this free webinar from WebMD.",
+            # Add more as needed
+        ]
+        for phrase in unwanted_phrases:
+            response = response.replace(phrase, "")
+        # Remove excessive whitespace
+        response = re.sub(r'\n{3,}', '\n\n', response)
+        response = re.sub(r'\s{2,}', ' ', response)
+        # Convert plain URLs to Markdown hyperlinks (WebMD example)
+        def url_to_md(match):
+            url = match.group(0)
+            if "webmd.com" in url:
+                return f"[WebMD: 5 Ways to Get Rid of a Headache]({url})"
+            return f"[Link]({url})"
+        response = re.sub(r'https?://[\w./?=&%-]+', url_to_md, response)
+        return response.strip()
+
+    # --- LLM-based relevance extraction for Brave Search output ---
+    async def _extract_relevant_text_with_llm(self, user_input: str, raw_output: str) -> str:
+        """Use the LLM to extract only the most relevant answer for the user's query from the raw Brave Search output."""
+        from langchain_groq import ChatGroq
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from llm.config import settings
+        llm = ChatGroq(
+            temperature=0.2,
+            model_name=settings.REASONING_MODEL,
+            groq_api_key=settings.GROQ_API_KEY
+        )
+        system_prompt = (
+            "You are a helpful assistant. Given the user's question and a raw web search result, "
+            "extract and return ONLY the most relevant, clear, and context-aware answer for the user. "
+            "Remove any out-of-context, irrelevant, or distracting text. "
+            "If there is a useful link, format it as a Markdown hyperlink. "
+            "Do NOT include disclaimers, ads, or unrelated sentences. "
+            "Respond in a professional, concise, and user-friendly way."
+        )
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"User question: {user_input}\n\nRaw web search output: {raw_output}")
+        ]
+        result = await llm.ainvoke(messages)
+        return result.content.strip()
 
 # ... (rest of the code remains the same)

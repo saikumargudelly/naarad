@@ -52,28 +52,8 @@ def create_agent(agent_type: str, **kwargs) -> BaseAgent:
         raise ValueError(f"Failed to create {agent_type} agent: {str(e)}") from e
 
 def create_default_agents() -> Dict[str, BaseAgent]:
-    """Create default instances of all available agents.
-    
-    Returns:
-        Dict mapping agent names to agent instances
-    """
-    agents = {}
-    agent_types = ['responder', 'researcher', 'analyst', 'quality']
-    
-    for agent_type in agent_types:
-        try:
-            agents[agent_type] = create_agent(agent_type)  # No AgentConfig, just dict
-            logger.info(f"Successfully created {agent_type} agent")
-        except Exception as e:
-            logger.error(f"Failed to create {agent_type} agent: {str(e)}", exc_info=True)
-            continue
-    
-    if not agents:
-        logger.warning("No agents were successfully created")
-    else:
-        logger.info(f"Successfully created {len(agents)} agents")
-    
-    return agents
+    """Legacy function removed: Use NaaradAgent class for all agent instantiation."""
+    raise NotImplementedError("create_default_agents() is deprecated. Use NaaradAgent class instead.")
 
 def get_agent_class(agent_name: str) -> Optional[Type[BaseAgent]]:
     """Get an agent class by name.

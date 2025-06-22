@@ -24,7 +24,7 @@ class TestVoiceFeatures:
         return VoiceAgent(AgentConfig(
             name="test_voice_agent",
             description="Test voice agent",
-            model_name="mixtral-8x7b-instruct-v0.1"
+            model_name="llama3-70b-8192"
         ))
     
     @pytest.fixture
@@ -79,7 +79,7 @@ class TestVoiceFeatures:
         """Test voice agent initialization."""
         assert voice_agent.name == "test_voice_agent"
         assert voice_agent.description == "Test voice agent"
-        assert voice_agent.model_name == "mixtral-8x7b-instruct-v0.1"
+        assert voice_agent.model_name == "llama3-70b-8192"
         assert hasattr(voice_agent, 'speech_recognition')
         assert hasattr(voice_agent, 'text_to_speech')
     
