@@ -6,10 +6,15 @@ from fastapi.responses import JSONResponse
 import logging
 import uvicorn
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+import os
 
 from config.config import settings
 from config.logging_config import setup_logging
-from routers import chat, websocket, voice, analytics, personalization
+from routers import chat_router, websocket_router, voice_router, analytics_router, personalization_router
+
+# Load environment variables from .env at startup
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Setup logging
 setup_logging()
@@ -48,11 +53,11 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
-app.include_router(websocket.router, prefix="/api/v1", tags=["websocket"])
-app.include_router(voice.router, prefix="/api/v1", tags=["voice"])
-app.include_router(analytics.router, prefix="/api/v1", tags=["analytics"])
-app.include_router(personalization.router, prefix="/api/v1", tags=["personalization"])
+app.include_router(chat_router, prefix="/api/v1", tags=["chat"])
+app.include_router(websocket_router, prefix="/api/v1", tags=["websocket"])
+app.include_router(voice_router, prefix="/api/v1", tags=["voice"])
+app.include_router(analytics_router, prefix="/api/v1", tags=["analytics"])
+app.include_router(personalization_router, prefix="/api/v1", tags=["personalization"])
 
 @app.get("/")
 async def root():

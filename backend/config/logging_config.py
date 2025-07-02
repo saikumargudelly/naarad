@@ -144,7 +144,11 @@ def setup_logging(settings: Optional[LoggingSettings] = None):
     if settings is None:
         settings = LoggingSettings()
 
-    log_level = getattr(logging, str(settings.LOG_LEVEL), logging.INFO)
+    # Set up root logger to DEBUG by default
+    log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    logging.basicConfig(level=log_level)
+    logging.getLogger().setLevel(log_level)
+
     log_format = settings.LOG_FORMAT
 
     # Ensure log directory exists

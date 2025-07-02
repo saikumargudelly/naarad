@@ -27,6 +27,32 @@ class Intent(Enum):
     PREDICTION = "prediction"
     LEARNING = "learning"
     QUANTUM = "quantum"
+    HAPPY = "happy"
+    SAD = "sad"
+    ROMANTIC = "romantic"
+    TEACHING = "teaching"
+    ADVICE = "advice"
+    MOTIVATIONAL = "motivational"
+    JOKE = "joke"
+    THANKS = "thanks"
+    APOLOGY = "apology"
+    CHITCHAT = "chitchat"
+    COMPLAINT = "complaint"
+    CURIOSITY = "curiosity"
+    HEALTH = "health"
+    FOOD = "food"
+    TRAVEL = "travel"
+    FINANCE = "finance"
+    SPORTS = "sports"
+    NEWS = "news"
+    SHOPPING = "shopping"
+    TECH_SUPPORT = "tech_support"
+    FAREWELL = "farewell"
+    RECOMMENDATION = "recommendation"
+    MUSIC = "music"
+    MOVIE = "movie"
+    TRENDING = "trending"
+    ENTERTAINMENT = "entertainment"
 
 @dataclass
 class Entity:
@@ -83,8 +109,12 @@ class EnhancedRouter:
                 # Removed reminder pattern from here to avoid conflicts
             ],
             Intent.SEARCH: [
-                (re.compile(r'(?:search|find|look\s+up)(?:\s+for|\s+me)?', re.IGNORECASE), 1.0),
-                (re.compile(r'can\s+you\s+find', re.IGNORECASE), 0.8),
+                (re.compile(r'\b(news|headlines|breaking news|latest news|top news|news update|current events|top stories|recent updates|trending news|news articles|web search|internet news|show me the news|find news|search for news|news in [a-zA-Z ]+|news about [a-zA-Z ]+)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(show|find|search|lookup|get)\s+(me\s+)?(the\s+)?(news|headlines|updates|stories)\b', re.IGNORECASE), 0.95),
+                (re.compile(r'\bwhat\'s\s+happening\s+now\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(recent|latest|breaking|trending)\s+(news|stories|updates)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(when is|next|upcoming|live|result|fixture|tournament|series|schedule|match|game|score|event|cricket|football|olympics|world cup|sports)\b', re.IGNORECASE), 0.9),
+                (re.compile(r'\b(when will be the next [a-zA-Z ]+ match|who won the last match|find sports results|sports updates|latest sports news)\b', re.IGNORECASE), 1.0),
             ],
             Intent.GREETING: [
                 (re.compile(r'^(?:hello|hi|hey|greetings|good\s+(?:morning|afternoon|evening))\b', re.IGNORECASE), 1.0),
@@ -118,7 +148,92 @@ class EnhancedRouter:
             ],
             Intent.GENERAL: [
                 (re.compile(r'^$'), 1.0),
-            ]
+            ],
+            Intent.HAPPY: [
+                (re.compile(r'\b(i am|feeling|so|very)?\s*(happy|joyful|excited|delighted|cheerful|glad|content|elated|ecstatic|thrilled)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(celebrate|congratulations|good news|awesome|fantastic|wonderful|yay|hooray)\b', re.IGNORECASE), 0.9),
+            ],
+            Intent.SAD: [
+                (re.compile(r'\b(i am|feeling|so|very)?\s*(sad|unhappy|depressed|down|blue|miserable|gloomy|disappointed|heartbroken|upset|cry|tears)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(bad news|sorry for|condolences|loss|regret|pain|hurt|sorrow|grief)\b', re.IGNORECASE), 0.9),
+            ],
+            Intent.ROMANTIC: [
+                (re.compile(r'\b(love|romantic|crush|date|dating|relationship|partner|sweetheart|valentine|affection|admire|miss you|thinking of you|heart)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(i love you|be my valentine|my darling|my dear|sweetie|honey|babe|baby|kiss|hug)\b', re.IGNORECASE), 0.9),
+            ],
+            Intent.TEACHING: [
+                (re.compile(r'\b(teaching|teach|explain|instruct|lesson|class|lecture|tutor|how to|guide|demonstrate|show me|help me learn)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(can you teach|could you explain|help me understand|walk me through)\b', re.IGNORECASE), 0.9),
+            ],
+            Intent.ADVICE: [
+                (re.compile(r'\b(advice|suggest|recommend|what should i do|any tips|guidance|counsel|help me decide|should i|would you suggest|do you think)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(what would you do|can you advise|give me some advice|recommendation)\b', re.IGNORECASE), 0.9),
+            ],
+            Intent.MOTIVATIONAL: [
+                (re.compile(r'\b(motivate|motivation|inspire|inspiration|encourage|encouragement|uplift|boost my mood|cheer me up|positive thinking|stay strong|keep going|don\'t give up|believe in yourself|you can do it|never give up|success|goal|dream|ambition)\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(you are capable|you are strong|you are enough|keep pushing|keep fighting|don\'t quit|persevere|resilience|determination)\b', re.IGNORECASE), 0.9),
+            ],
+            Intent.JOKE: [
+                (re.compile(r'\b(joke|funny|make me laugh|tell me something funny|humor|crack a joke|something hilarious)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.THANKS: [
+                (re.compile(r'\b(thank you|thanks|appreciate it|grateful|much obliged|cheers)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.APOLOGY: [
+                (re.compile(r'\b(sorry|my apologies|pardon me|forgive me|excuse me|apologize)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.CHITCHAT: [
+                (re.compile(r'\b(how are you|what\'s up|how\'s it going|how is your day|tell me something|let\'s chat|let\'s talk|anything new|what are you doing|what\'s new|how have you been)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.COMPLAINT: [
+                (re.compile(r'\b(this is annoying|i\'m frustrated|not working|problem|issue|complain|complaint|disappointed|angry|upset|irritated|bad experience)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.CURIOSITY: [
+                (re.compile(r'\b(why|how|what|when|where|who|which|explain|tell me about|i wonder|curious|can you tell me|could you explain)\b', re.IGNORECASE), 0.8),
+            ],
+            Intent.HEALTH: [
+                (re.compile(r'\b(health|wellness|sick|ill|doctor|medicine|treatment|symptom|pain|headache|fever|how to stay healthy|diet|exercise|workout|mental health|stress|anxiety|depression)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.FOOD: [
+                (re.compile(r'\b(food|recipe|cook|cooking|eat|dinner|lunch|breakfast|snack|meal|restaurant|suggest a recipe|what should i eat|hungry|cuisine|dish|bake|baking)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.TRAVEL: [
+                (re.compile(r'\b(travel|trip|vacation|holiday|tour|journey|flight|hotel|destination|where should i go|travel tips|places to visit|sightseeing|tourist|adventure)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.FINANCE: [
+                (re.compile(r'\b(finance|money|investment|invest|save|saving|budget|expense|spend|spending|income|salary|bank|loan|credit|debt|how to save money|investment tips|stock|stocks|market|cryptocurrency|bitcoin|ethereum)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.SPORTS: [
+                (re.compile(r'\b(sports|game|match|score|team|player|tournament|league|football|soccer|cricket|basketball|tennis|baseball|golf|who won|sports news|sports update)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.NEWS: [
+                (re.compile(r'\b(news|headline|current event|breaking news|latest news|top news|news update|current events|top stories|recent updates|trending news|news articles|world news|show me the news|find news|search for news)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.SHOPPING: [
+                (re.compile(r'\b(shop|shopping|buy|purchase|order|product|recommend a|best|suggest a|where to buy|price|cost|deal|discount|sale|ecommerce|online store|laptop|phone|gadget|clothes|shoes|gift)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.TECH_SUPPORT: [
+                (re.compile(r'\b(technical support|tech support|help with|fix|repair|troubleshoot|not working|broken|error|issue|problem|how to fix|my computer|my phone|my device|wifi|internet|crash|freeze|slow|update|install|uninstall|reboot|restart)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.FAREWELL: [
+                (re.compile(r'\b(goodbye|bye|see you|farewell|take care|catch you later|talk to you later|see ya|have a nice day|have a good day|until next time)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.RECOMMENDATION: [
+                (re.compile(r'\b(suggest|recommend|what should i|any ideas|can you suggest|could you recommend|give me some|what are some good|best)\b.*\b(song|music|movie|film|show|series|book|activity|place|restaurant|food|game|app|podcast|video|playlist|activity|thing to do|idea|ideas|recommendation|suggestion)s?\b', re.IGNORECASE), 1.0),
+                (re.compile(r'\b(what\'s trending|trending now|popular now|hot right now|top charts|top songs|top movies|top shows|top news|top games|top books|top podcasts)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.MUSIC: [
+                (re.compile(r'\b(song|music|playlist|album|artist|band|sing|listen to music|good songs|best songs|suggest songs|recommend songs|music for|songs for|rainy day music|rainy day songs|songs to listen|music to listen)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.MOVIE: [
+                (re.compile(r'\b(movie|film|cinema|watch a movie|good movies|best movies|suggest movies|recommend movies|movies for|films for|movie night|movie to watch|film to watch)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.TRENDING: [
+                (re.compile(r'\b(trending|what\'s trending|trending now|popular now|hot right now|viral|top charts|top news|top songs|top movies|top shows|top games|top books|top podcasts)\b', re.IGNORECASE), 1.0),
+            ],
+            Intent.ENTERTAINMENT: [
+                (re.compile(r'\b(entertainment|fun|funny|bored|what to do for fun|entertain me|make me laugh|pass the time|activities for|things to do|games to play|ways to relax|relaxation|leisure|hobby|hobbies)\b', re.IGNORECASE), 1.0),
+            ],
         }
     
     def _initialize_entity_patterns(self) -> Dict[str, List[Tuple[re.Pattern, float]]]:
@@ -180,6 +295,49 @@ class EnhancedRouter:
                 "what's 100 divided by 5"
             ],
             # ... (examples for other intents)
+            Intent.SEARCH: [
+                "latest news",
+                "top news now",
+                "breaking news",
+                "news headlines",
+                "show me the news",
+                "find recent news",
+                "search for news",
+                "current events",
+                "what's happening now",
+                "recent updates",
+                "top stories",
+                "news in india",
+                "latest updates",
+                "trending news",
+                "news articles",
+                "web search for news",
+                "internet news",
+                "find news about technology",
+                "show me headlines",
+                "news update today",
+                "when is the next test match",
+                "when is the next cricket match",
+                "when is the next football game",
+                "upcoming matches",
+                "upcoming games",
+                "sports schedule",
+                "cricket schedule",
+                "football fixtures",
+                "live score",
+                "match result",
+                "tournament schedule",
+                "series schedule",
+                "next match between india and england",
+                "when is the next event",
+                "upcoming sports events",
+                "when is the next olympics",
+                "when is the next world cup",
+                "who won the last match",
+                "latest sports news",
+                "sports updates",
+                "find sports results"
+            ],
         }
     
     def _train_intent_classifier(self):

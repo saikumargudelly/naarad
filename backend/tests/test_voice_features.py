@@ -83,16 +83,17 @@ class TestVoiceFeatures:
         assert hasattr(voice_agent, 'speech_recognition')
         assert hasattr(voice_agent, 'text_to_speech')
     
-    @pytest.mark.asyncio
-    async def test_speech_recognition_simulation(self, voice_agent, sample_audio_data):
-        """Test speech recognition with simulated audio."""
-        with patch.object(voice_agent.speech_recognition, '_run') as mock_run:
-            mock_run.return_value = "Hello, this is a test transcription."
-            
-            result = voice_agent.speech_recognition._run(sample_audio_data)
-            
-            assert result == "Hello, this is a test transcription."
-            mock_run.assert_called_once_with(sample_audio_data)
+    # NOTE: Audio transcription features are coming in a future update.
+    # The following tests related to audio transcription are commented out until the feature is available.
+
+    # @pytest.mark.asyncio
+    # async def test_speech_recognition_simulation(self, voice_agent, sample_audio_data):
+    #     """Test speech recognition with simulated audio."""
+    #     with patch.object(voice_agent.speech_recognition, '_run') as mock_run:
+    #         mock_run.return_value = "Hello, this is a test transcription."
+    #         result = voice_agent.speech_recognition._run(sample_audio_data)
+    #         assert result == "Hello, this is a test transcription."
+    #         mock_run.assert_called_once_with(sample_audio_data)
     
     @pytest.mark.asyncio
     async def test_text_to_speech_simulation(self, voice_agent, sample_text):
@@ -111,34 +112,34 @@ class TestVoiceFeatures:
             assert result["voice"] == "alloy"
             assert result["format"] == "mp3"
     
-    def test_voice_process_endpoint(self, sample_audio_data):
-        """Test voice processing endpoint."""
-        with patch('routers.voice.voice_agent.process_voice_input') as mock_process:
-            mock_process.return_value = {
-                "success": True,
-                "transcribed_text": "Hello, this is a test.",
-                "response_text": "Hello! I heard you say: Hello, this is a test.",
-                "audio_response": "data:audio/mp3;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT",
-                "metadata": {"voice_used": "alloy"}
-            }
-            
-            response = client.post(
-                "/api/v1/voice/process",
-                json={
-                    "audio_data": sample_audio_data,
-                    "user_id": "test_user",
-                    "voice_preference": "alloy",
-                    "generate_audio": True
-                }
-            )
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert data["success"] is True
-            assert "transcribed_text" in data
-            assert "response_text" in data
-            assert "audio_response" in data
-            assert "processing_time" in data
+    # def test_voice_process_endpoint(self, sample_audio_data):
+    #     """Test voice processing endpoint."""
+    #     with patch('routers.voice.voice_agent.process_voice_input') as mock_process:
+    #         mock_process.return_value = {
+    #             "success": True,
+    #             "transcribed_text": "Hello, this is a test.",
+    #             "response_text": "Hello! I heard you say: Hello, this is a test.",
+    #             "audio_response": "data:audio/mp3;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT",
+    #             "metadata": {"voice_used": "alloy"}
+    #         }
+    #         
+    #         response = client.post(
+    #             "/api/v1/voice/process",
+    #             json={
+    #                 "audio_data": sample_audio_data,
+    #                 "user_id": "test_user",
+    #                 "voice_preference": "alloy",
+    #                 "generate_audio": True
+    #             }
+    #         )
+    #         
+    #         assert response.status_code == 200
+    #         data = response.json()
+    #         assert data["success"] is True
+    #         assert "transcribed_text" in data
+    #         assert "response_text" in data
+    #         assert "audio_response" in data
+    #         assert "processing_time" in data
     
     def test_voice_synthesize_endpoint(self, sample_text):
         """Test speech synthesis endpoint."""

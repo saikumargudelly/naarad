@@ -25,6 +25,7 @@ const ChatInterface = () => {
   const [analyticsData, setAnalyticsData] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [currentUserId] = useState(`user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+  const [currentConversationId] = useState(`conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   const wsRef = useRef(null);
 
   const messagesEndRef = useRef(null);
@@ -43,7 +44,8 @@ const ChatInterface = () => {
     // If a connection already exists, do nothing.
     if (wsRef.current) return;
 
-    const ws = new WebSocket(`ws://localhost:8000/api/v1/ws/${currentUserId}`);
+    // Use the correct backend endpoint for WebSocket chat
+    const ws = new WebSocket(`ws://localhost:8000/api/v1/ws/chat/${currentUserId}/${currentConversationId}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -92,6 +94,7 @@ const ChatInterface = () => {
           timestamp: new Date().toISOString(),
           isStreaming: false
         }]);
+        setIsLoading(false);
         break;
       
       case 'stream_chunk':
@@ -185,6 +188,7 @@ const ChatInterface = () => {
         type: 'text',
         message,
         conversation_id: conversationId,
+        timestamp: new Date().toISOString(),
       };
       wsRef.current.send(JSON.stringify(messageData));
       setIsLoading(true);
@@ -406,6 +410,8 @@ const ChatInterface = () => {
               isProcessing={isLoading}
               voiceEnabled={voiceEnabled}
               onToggleVoice={() => setVoiceEnabled(!voiceEnabled)}
+              userId={currentUserId}
+              conversationId={currentConversationId}
             />
           </div>
         )}

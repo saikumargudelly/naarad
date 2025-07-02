@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Type, TypeVar, Any, Type
 
 # Import only BaseAgent to avoid circular imports
 from .agents.base import BaseAgent
+from .orchestrator import AgentOrchestrator
+from .memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -237,3 +239,22 @@ class AgentManager:
             logger.info(f"Removed agent: {name}")
             return True
         return False
+
+def create_orchestrator_with_agents() -> AgentOrchestrator:
+    """Create all modular agents with shared MemoryManager and return an AgentOrchestrator."""
+    memory_manager = MemoryManager()
+    # Import agent classes
+    from .agents.researcher import ResearcherAgent
+    from .agents.analyst import AnalystAgent
+    from .agents.responder import ResponderAgent
+    from .agents.quality import QualityAgent
+    # Add more as needed...
+    # Instantiate agents with memory_manager
+    agents = {
+        'researcher': ResearcherAgent(config={'name': 'researcher'}, memory_manager=memory_manager),
+        'analyst': AnalystAgent(config={'name': 'analyst'}, memory_manager=memory_manager),
+        'responder': ResponderAgent(config={'name': 'responder'}, memory_manager=memory_manager),
+        'quality_agent': QualityAgent(config={'name': 'quality_agent'}, memory_manager=memory_manager),
+        # Add more agents here as you refactor them
+    }
+    return AgentOrchestrator(base_agents=agents, metrics=None, router=None)

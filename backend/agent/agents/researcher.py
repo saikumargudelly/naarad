@@ -6,6 +6,7 @@ gathering information from various sources using tools like BraveSearch.
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Union
 
 # LangChain imports
@@ -14,23 +15,23 @@ from langchain_core.tools import BaseTool
 # Local imports
 from .base import BaseAgent, AgentConfig
 from llm.config import settings
+from agent.memory.memory_manager import MemoryManager
+from sentence_transformers import SentenceTransformer, util
 
 logger = logging.getLogger(__name__)
 
 class ResearcherAgent(BaseAgent):
     """Agent specialized in finding and gathering information from various sources.
-    
-    This agent is designed to handle research-intensive tasks by leveraging available tools
-    to gather, analyze, and synthesize information from multiple sources. It includes robust
-    error handling for API limits and missing dependencies.
+    Modular, stateless, and uses injected memory manager for context/state.
     """
     
-    def __init__(self, config: Union[AgentConfig, Dict[str, Any]]):
+    def __init__(self, config: Union[AgentConfig, Dict[str, Any]], memory_manager: MemoryManager = None):
         """Initialize the researcher agent with configuration.
         
         Args:
             config: The configuration for the agent. Can be a dictionary or AgentConfig instance.
                    If None, default values will be used.
+            memory_manager: The memory manager for the agent. If None, no memory manager will be used.
         """
         if not isinstance(config, (AgentConfig, dict)):
             raise ValueError("config must be an AgentConfig instance or a dictionary")
@@ -89,6 +90,13 @@ If the query is outside your research domain or the intent confidence is low, es
             }
             # Initialize tools list
             agent_tools = []
+            # Try to import and initialize GNewsSearchTool if API key is available
+            if os.getenv('GNEWS_API_KEY'):
+                try:
+                    from ..tools.gnews_search import GNewsSearchTool
+                    agent_tools.append(GNewsSearchTool())
+                except ImportError as e:
+                    logger.warning(f"Failed to load GNewsSearchTool: {e}")
             # Try to import and initialize BraveSearchTool if API key is available
             if os.getenv('BRAVE_API_KEY'):
                 try:
@@ -108,6 +116,8 @@ If the query is outside your research domain or the intent confidence is low, es
             config = default_config
             
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"ResearcherAgent initialized with memory_manager: {bool(memory_manager)}")
         
         # Check for required API keys and services
         missing_apis = []
@@ -129,6 +139,94 @@ If the query is outside your research domain or the intent confidence is low, es
         # Initialize logging and metrics
         self.search_count = 0
         self.last_search_time = None
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    def _truncate_for_llm(self, text: str, max_chars: int = 1500) -> str:
+        """Truncate text to fit within LLM token limits.
+        
+        Args:
+            text: The text to truncate
+            max_chars: Maximum characters to allow (roughly 1500 chars ≈ 2000 tokens)
+            
+        Returns:
+            Truncated text with ellipsis if needed
+        """
+        if not text or len(text) <= max_chars:
+            return text
+        
+        # Truncate and add ellipsis
+        truncated = text[:max_chars-3] + "..."
+        logger.warning(f"Truncated text from {len(text)} to {len(truncated)} characters for LLM")
+        return truncated
+    
+    def _estimate_total_payload_size(self, agent_input: Dict[str, Any]) -> int:
+        """Estimate the total payload size in characters."""
+        total_size = 0
+        for key, value in agent_input.items():
+            if isinstance(value, str):
+                total_size += len(value)
+            elif isinstance(value, dict):
+                total_size += len(str(value))
+            else:
+                total_size += len(str(value))
+        return total_size
+    
+    def _truncate_chat_history(self, chat_history: str, max_chars: int = 2000) -> str:
+        """Truncate chat history to prevent token limit exceeded errors.
+        
+        Args:
+            chat_history: The chat history string
+            max_chars: Maximum characters to allow
+            
+        Returns:
+            Truncated chat history
+        """
+        if not chat_history or len(chat_history) <= max_chars:
+            return chat_history
+        
+        # Try to truncate to last N messages if it's a structured format
+        if "Human:" in chat_history and "Assistant:" in chat_history:
+            # Split by message boundaries and keep last few messages
+            messages = chat_history.split("Human:")
+            if len(messages) > 1:
+                # Keep the last 3 message exchanges
+                recent_messages = messages[-3:]
+                truncated = "Human:".join(recent_messages)
+                if len(truncated) > max_chars:
+                    truncated = self._truncate_for_llm(truncated, max_chars)
+                logger.warning(f"Truncated chat history to last 3 messages ({len(truncated)} chars)")
+                return truncated
+        
+        # Fallback to simple truncation
+        return self._truncate_for_llm(chat_history, max_chars)
+    
+    def _truncate_context(self, context: Any, max_chars: int = 1000) -> Any:
+        """Truncate context to prevent token limit exceeded errors.
+        
+        Args:
+            context: The context data (dict, string, or other)
+            max_chars: Maximum characters to allow
+            
+        Returns:
+            Truncated context
+        """
+        if not context:
+            return context
+        
+        if isinstance(context, str):
+            return self._truncate_for_llm(context, max_chars)
+        elif isinstance(context, dict):
+            # Convert dict to string and truncate
+            context_str = str(context)
+            if len(context_str) > max_chars:
+                truncated_str = self._truncate_for_llm(context_str, max_chars)
+                logger.warning(f"Truncated context dict from {len(context_str)} to {len(truncated_str)} characters")
+                return truncated_str
+            return context
+        else:
+            # For other types, convert to string and truncate
+            context_str = str(context)
+            return self._truncate_for_llm(context_str, max_chars)
     
     def _create_agent(self):
         """Create and configure the LangChain agent for research tasks.
@@ -204,15 +302,42 @@ If the query is outside your research domain or the intent confidence is low, es
 
             # Only pass expected keys to the agent
             agent_input = {"input": processed_query}
+            
+            # Truncate chat_history to prevent token limit exceeded errors
             if "chat_history" in kwargs:
-                agent_input["chat_history"] = kwargs["chat_history"]
+                agent_input["chat_history"] = self._truncate_chat_history(kwargs["chat_history"])
+            
+            # Truncate context to prevent token limit exceeded errors
             if "context" in kwargs:
-                agent_input["context"] = kwargs["context"]
+                agent_input["context"] = self._truncate_context(kwargs["context"])
+
+            # Final payload size check - more aggressive for 8b model
+            total_payload_size = self._estimate_total_payload_size(agent_input)
+            logger.warning(f"LLM model: {self.config.model_name}, payload size: {total_payload_size}")
+            logger.warning(f"agent_input keys: {list(agent_input.keys())}, input length: {len(agent_input.get('input', ''))}, chat_history length: {len(agent_input.get('chat_history', ''))}, context length: {len(str(agent_input.get('context', '')))}")
+            if total_payload_size > 4000:  # Very conservative limit for 8b model
+                logger.warning(f"Payload size {total_payload_size} exceeds limit, applying emergency truncation")
+                # Emergency truncation: keep only essential fields
+                agent_input = {
+                    "input": agent_input.get("input", "")[:500],
+                    "chat_history": "",
+                    "context": ""
+                }
 
             # Execute the agent
-            result = self.agent.invoke(agent_input)
-            # Post-process the results
-            return self._postprocess_research(result)
+            try:
+                result = self.agent.invoke(agent_input)
+                # Post-process the results
+                return self._postprocess_research(result)
+            except Exception as llm_error:
+                if "413" in str(llm_error) or "too large" in str(llm_error).lower() or "token" in str(llm_error).lower():
+                    logger.warning(f"LLM token limit exceeded, trying with minimal context: {llm_error}")
+                    # Try again with minimal context
+                    minimal_input = {"input": processed_query, "chat_history": ""}
+                    result = self.agent.invoke(minimal_input)
+                    return self._postprocess_research(result)
+                else:
+                    raise llm_error
         except Exception as e:
             logger.error(f"Error in research process: {str(e)}", exc_info=True)
             return {
@@ -223,19 +348,175 @@ If the query is outside your research domain or the intent confidence is low, es
                 }
             }
 
-    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """Async process method for research agent."""
+    def _is_realtime_query(self, input_text: str, chat_history: str = "") -> bool:
+        """Detect if the query is about news, sports, schedules, or real-time events, using context if available."""
+        realtime_patterns = [
+            r"\b(news|headline|current event|breaking|top|latest|update|today|now|report|trend|event|announcement|release|find|search|web|internet|article|source|reference)\b",
+            r"\b(match|game|tournament|schedule|fixture|cricket|football|soccer|test match|series|event|score|live|result|when is|date|time|upcoming|next|sports|athlete|player|team|league|cup|olympic|world cup|championship|draw|round|quarterfinal|semifinal|final|kickoff|start|begin|play|vs\.?|versus|playing 11|lineup|squad|team selection|probable|expected|roster|squad list|captain|coach|manager|injury|transfer|auction|draft|substitute|bench|formation|strategy|batting order|bowling order|pitch report|weather|umpire|referee|stadium|venue|broadcast|telecast|stream|tickets|fan|supporter|crowd|attendance|press conference|media|announcement|statement|rumor|speculation|prediction|preview|review|analysis|statistic|record|milestone|history|highlight|summary|recap|reaction|opinion|comment|quote|interview|exclusive|breaking news|live update|minute by minute|as it happens|real time|today|tonight|tomorrow|this week|this month|this year|now|soon|imminent|forthcoming|upcoming|future|next|latest|recent|current|ongoing|scheduled|postponed|delayed|cancelled|rescheduled|confirmed|official|provisional|tentative|finalized|announced|declared|named|listed|shortlisted|selected|picked|chosen|called up|drafted|signed|joined|left|released|retired|comeback|return|debut|first appearance|farewell|last match|final match|goodbye|tribute|honor|award|recognition|celebration|ceremony|event)\b"
+        ]
+        input_text_lower = input_text.lower()
+        for pattern in realtime_patterns:
+            if re.search(pattern, input_text_lower):
+                return True
+        # Check if previous user message in chat_history was real-time
+        if chat_history:
+            # Try to extract last user message from chat_history (string or list)
+            last_user_msg = ""
+            if isinstance(chat_history, str):
+                # Assume format: 'Human: ...\nAssistant: ...\nHuman: ...'
+                user_msgs = [m for m in chat_history.split('Human:') if m.strip()]
+                if user_msgs:
+                    last_user_msg = user_msgs[-1].strip().split('Assistant:')[0].strip()
+            elif isinstance(chat_history, list):
+                # Assume list of dicts with 'role' and 'content'
+                user_msgs = [m.get('content', '') for m in chat_history if m.get('role', '').lower() == 'user']
+                if user_msgs:
+                    last_user_msg = user_msgs[-1]
+            if last_user_msg:
+                for pattern in realtime_patterns:
+                    if re.search(pattern, last_user_msg.lower()):
+                        # If current query is contextually related (e.g., contains 'playing 11', 'lineup', etc.)
+                        followup_patterns = [
+                            r"\b(playing 11|lineup|squad|team selection|probable|expected|roster|squad list|batting order|bowling order|strategy|formation|injury|substitute|bench|captain|coach|manager|prediction|preview|analysis|statistic|record|milestone|highlight|summary|recap|reaction|opinion|comment|quote|interview|exclusive|breaking news|live update|minute by minute|as it happens|real time|today|tonight|tomorrow|this week|this month|this year|now|soon|imminent|forthcoming|upcoming|future|next|latest|recent|current|ongoing|scheduled|postponed|delayed|cancelled|rescheduled|confirmed|official|provisional|tentative|finalized|announced|declared|named|listed|shortlisted|selected|picked|chosen|called up|drafted|signed|joined|left|released|retired|comeback|return|debut|first appearance|farewell|last match|final match|goodbye|tribute|honor|award|recognition|celebration|ceremony|event)\b"
+                        ]
+                        for fpat in followup_patterns:
+                            if re.search(fpat, input_text_lower):
+                                return True
+        return False
+
+    async def _synthesize_answer_with_llm(self, user_question: str, articles: list) -> str:
+        """Use the LLM to synthesize a concise, accurate answer from news articles."""
+        from langchain_groq import ChatGroq
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from llm.config import settings
+        if not articles:
+            return "No relevant news articles found."
+        # Sort articles by relevance: prioritize those whose title/description best match the question
+        def relevance_score(article):
+            text = (article.get('title', '') + ' ' + article.get('description', '')).lower()
+            score = 0
+            for word in user_question.lower().split():
+                if word in text:
+                    score += 1
+            return score
+        sorted_articles = sorted(articles, key=relevance_score, reverse=True)
+        # Concatenate top 5 snippets for LLM synthesis
+        context_snippets = "\n".join(
+            f"{a.get('title', '')}: {a.get('description', '')} (Source: {a.get('url', '')})"
+            for a in sorted_articles[:5]
+        )
+        system_prompt = (
+            "You are a world-class research assistant. Given the user's question and a set of news search results, "
+            "synthesize a single, concise, and accurate answer. If a date, location, or key fact is mentioned, include it. "
+            "Always cite the most relevant source link. Do not list all articles—just answer the question as directly as possible."
+        )
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"User question: {user_question}\n\nNews search results:\n{context_snippets}")
+        ]
+        llm = ChatGroq(
+            temperature=0.2,
+            model_name=settings.REASONING_MODEL,
+            groq_api_key=os.getenv('GROQ_API_KEY')
+        )
+        result = await llm.ainvoke(messages)
+        return result.content.strip()
+
+    async def _extract_topic_with_llm(self, chat_history: str, input_text: str) -> str:
+        """Use the LLM to extract the main topic from the conversation."""
+        from langchain_groq import ChatGroq
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from llm.config import settings
+        system_prompt = (
+            "You are an expert conversation analyst. Given the following conversation and the latest user message, "
+            "extract the main topic or subject being discussed in a single phrase. If the topic is ambiguous, return your best guess."
+        )
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Conversation so far:\n{chat_history}\n\nLatest user message:\n{input_text}\n\nMain topic:")
+        ]
+        llm = ChatGroq(
+            temperature=0.2,
+            model_name=settings.REASONING_MODEL,
+            groq_api_key=os.getenv('GROQ_API_KEY')
+        )
+        result = await llm.ainvoke(messages)
+        return result.content.strip()
+
+    def _is_semantic_followup(self, input_text: str, chat_history: str, threshold: float = 0.7) -> bool:
+        """Detect if the current query is a semantic follow-up to the last user message."""
+        if not chat_history:
+            return False
+        last_user_msg = ""
+        if isinstance(chat_history, str):
+            user_msgs = [m for m in chat_history.split('Human:') if m.strip()]
+            if user_msgs:
+                last_user_msg = user_msgs[-1].strip().split('Assistant:')[0].strip()
+        elif isinstance(chat_history, list):
+            user_msgs = [m.get('content', '') for m in chat_history if m.get('role', '').lower() == 'user']
+            if user_msgs:
+                last_user_msg = user_msgs[-1]
+        if not last_user_msg:
+            return False
+        emb1 = self.embedding_model.encode(input_text, convert_to_tensor=True)
+        emb2 = self.embedding_model.encode(last_user_msg, convert_to_tensor=True)
+        similarity = util.pytorch_cos_sim(emb1, emb2).item()
+        return similarity > threshold
+
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"ResearcherAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
-            processed_query = self._preprocess_query(input_text)
-            agent_input = {"input": processed_query}
-            if "chat_history" in kwargs:
-                agent_input["chat_history"] = kwargs["chat_history"]
-            if context is not None:
-                agent_input["context"] = context
-            result = await self.agent.ainvoke(agent_input)
-            return self._postprocess_research(result)
+            chat_history = kwargs.get('chat_history', '')
+            # Use advanced context from conversation_memory
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Use robust check for real-time queries (news, sports, events, follow-ups)
+            is_realtime = self._is_realtime_query(input_text, chat_history)
+            is_semantic_followup = self._is_semantic_followup(input_text, chat_history)
+            realtime_intents = {'get_news', 'get_schedule', 'get_team_lineup', 'get_stats', 'get_event', 'get_result', 'get_update'}
+            if is_realtime or is_semantic_followup or (intent and intent in realtime_intents):
+                logger.info("[ResearcherAgent] Delegating real-time query to orchestrator's routing logic.")
+                return {
+                    'output': "[Orchestrator handles real-time routing and response. See orchestrator logs for details.]",
+                    'metadata': {
+                        'delegated_to_orchestrator': True,
+                        'success': None,
+                        'topic': topic,
+                        'intent': intent
+                    }
+                }
+            # For non-realtime queries, use LLM with full context
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a world-class research assistant. Use the conversation context, topic, and intent to answer the user's question as accurately and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
+            from langchain_groq import ChatGroq
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from llm.config import settings
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
+            ]
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
         except Exception as e:
-            logger.error(f"Async error in research process: {str(e)}", exc_info=True)
+            logger.error(f"Error in research process: {str(e)}", exc_info=True)
             return {
                 'output': f"I encountered an error while processing your research request: {str(e)}",
                 'metadata': {

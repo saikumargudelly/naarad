@@ -11,6 +11,7 @@ from enum import Enum
 import numpy as np
 
 from .base import BaseAgent, AgentConfig
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +45,13 @@ class QuantumSolution:
     quantum_advantage: str
 
 class QuantumAgent(BaseAgent):
-    """Agent specialized in quantum computing concepts and quantum-inspired problem solving."""
-    
-    def __init__(self, config: AgentConfig):
+    """Agent specialized in quantum computing concepts and quantum-inspired problem solving.
+    Modular, stateless, and uses injected memory manager for context/state.
+    """
+    def __init__(self, config: AgentConfig, memory_manager: MemoryManager = None):
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"QuantumAgent initialized with memory_manager: {bool(memory_manager)}")
         self.quantum_concepts = self._initialize_quantum_concepts()
         self.quantum_algorithms = self._load_quantum_algorithms()
         self.quantum_applications = self._load_quantum_applications()
@@ -227,45 +231,67 @@ class QuantumAgent(BaseAgent):
             ]
         }
     
-    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """Process quantum computing request and generate quantum-inspired insights."""
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, **kwargs) -> Dict[str, Any]:
+        """Process quantum request and generate quantum insights with explicit interface and memory integration.
+        Args:
+            input_text: The quantum query or request
+            context: Additional context (optional)
+            conversation_id: Conversation ID for memory (optional)
+            user_id: User ID for memory (optional)
+        Returns:
+            Dict containing the quantum insights and metadata
+        """
+        logger.info(f"QuantumAgent.process called | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
+            # Retrieve conversation memory if available
+            memory_context = None
+            if self.memory_manager and conversation_id and user_id:
+                memory_context = await self.memory_manager.get_conversation(conversation_id, user_id)
+                logger.debug(f"Loaded memory context for conversation_id={conversation_id}, user_id={user_id}")
+            # Merge provided context with memory context
+            merged_context = context or {}
+            if memory_context:
+                merged_context = {**memory_context.get('metadata', {}), **merged_context}
             quantum_concept = self._classify_quantum_request(input_text)
             if quantum_concept == QuantumConcept.SUPERPOSITION:
-                response = await self._explain_superposition(input_text, context)
+                response = await self._explain_superposition(input_text, merged_context)
             elif quantum_concept == QuantumConcept.ENTANGLEMENT:
-                response = await self._explain_entanglement(input_text, context)
+                response = await self._explain_entanglement(input_text, merged_context)
             elif quantum_concept == QuantumConcept.QUANTUM_TUNNELING:
-                response = await self._explain_quantum_tunneling(input_text, context)
+                response = await self._explain_quantum_tunneling(input_text, merged_context)
             elif quantum_concept == QuantumConcept.QUANTUM_ALGORITHMS:
-                response = await self._explain_quantum_algorithms(input_text, context)
+                response = await self._explain_quantum_algorithms(input_text, merged_context)
             elif quantum_concept == QuantumConcept.QUANTUM_CRYPTOGRAPHY:
-                response = await self._explain_quantum_cryptography(input_text, context)
+                response = await self._explain_quantum_cryptography(input_text, merged_context)
             else:
-                response = await self._generate_general_quantum_insights(input_text, context)
+                response = await self._generate_general_quantum_insights(input_text, merged_context)
             self._update_quantum_history(quantum_concept, input_text, response)
-            solutions = self._generate_quantum_solutions(quantum_concept, input_text)
-            # Contextual follow-up if multiple solutions/concepts
-            concepts = response.split('\n') if isinstance(response, str) else []
+            # Contextual follow-up if multiple solutions/insights
+            insights = response.split('\n') if isinstance(response, str) else []
             followup = ''
-            if len(concepts) > 4 or (isinstance(solutions, list) and len(solutions) > 2):
-                followup = self._contextual_followup(input_text, concepts + solutions, domain='quantum')
+            if len(insights) > 4:
+                followup = self._contextual_followup(input_text, insights, domain='quantum')
                 response += f"\n\n{followup}"
+            logger.info(f"QuantumAgent.process completed | conversation_id: {conversation_id} | user_id: {user_id}")
             return {
-                "success": True,
-                "output": response,
-                "quantum_concept": quantum_concept.value,
-                "quantum_solutions": solutions,
-                "quantum_metrics": self._calculate_quantum_metrics(quantum_concept),
-                "agent": "quantum_agent"
+                'success': True,
+                'output': response,
+                'quantum_concept': quantum_concept.value if hasattr(quantum_concept, 'value') else str(quantum_concept),
+                'metadata': {
+                    'solutions': self._generate_quantum_solutions(quantum_concept, input_text),
+                    'metrics': self._calculate_quantum_metrics(quantum_concept),
+                    'success': True
+                }
             }
         except Exception as e:
-            logger.error(f"Error in quantum processing: {str(e)}", exc_info=True)
+            logger.error(f"Async error in quantum agent: {str(e)}", exc_info=True)
             return {
-                "success": False,
-                "output": "Let me explore this from a quantum perspective...",
-                "error": str(e),
-                "agent": "quantum_agent"
+                'success': False,
+                'output': f"I encountered an error while processing the quantum request: {str(e)}",
+                'metadata': {
+                    'error': str(e),
+                    'success': False
+                }
             }
     
     def _classify_quantum_request(self, text: str) -> QuantumConcept:

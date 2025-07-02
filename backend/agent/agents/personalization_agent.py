@@ -10,14 +10,18 @@ from collections import defaultdict, Counter
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import os
 
 # LangChain imports
 from langchain_core.tools import BaseTool
 from langchain_core.language_models import BaseChatModel
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
 
 # Local imports
 from .base import BaseAgent, AgentConfig
 from llm.config import settings
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -247,12 +251,14 @@ class UserPreferenceTool(BaseTool):
         return "\n".join(insights)
 
 class PersonalizationAgent(BaseAgent):
-    """Agent specialized in personalization and user preference learning."""
-    
-    def __init__(self, config: Dict[str, Any]):
+    """Agent specialized in personalization and user preference learning.
+    Modular, stateless, and uses injected memory manager for context/state.
+    """
+    def __init__(self, config: Dict[str, Any], memory_manager: MemoryManager = None):
         """Initialize the personalization agent with configuration.
         Args:
             config: The configuration for the agent. Must be a dictionary.
+            memory_manager: The memory manager for context and state management
         """
         # Set default values if not provided
         default_config = {
@@ -268,6 +274,9 @@ class PersonalizationAgent(BaseAgent):
         config = default_config
         super().__init__(config)
         
+        self.memory_manager = memory_manager
+        logger.info(f"PersonalizationAgent initialized with memory_manager: {bool(memory_manager)}")
+        
         # Add personalization-specific tools
         self.user_preference = UserPreferenceTool()
         
@@ -276,6 +285,49 @@ class PersonalizationAgent(BaseAgent):
         self.personalization_threshold = 0.7  # Minimum confidence for personalization
         
         logger.info("Personalization Agent initialized")
+    
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"PersonalizationAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
+        try:
+            chat_history = kwargs.get('chat_history', '')
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Compose a context-aware prompt
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a personalization assistant. Use the conversation context, topic, and intent to answer the user's question as accurately and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
+            ]
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
+        except Exception as e:
+            logger.error(f"Async error in personalization process: {str(e)}", exc_info=True)
+            return {
+                'output': f"I encountered an error while processing your personalization request: {str(e)}",
+                'metadata': {
+                    'error': str(e),
+                    'success': False
+                }
+            }
     
     async def learn_from_interaction(
         self, 
@@ -303,47 +355,6 @@ class PersonalizationAgent(BaseAgent):
             return {
                 "success": False,
                 "error": str(e)
-            }
-    
-    async def get_personalized_response(
-        self, 
-        user_id: str,
-        base_response: str,
-        context: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
-        """Get a personalized version of a response based on user preferences."""
-        
-        try:
-            # Get user preferences
-            prefs_result = self.user_preference._run(user_id, "get")
-            
-            if "No preferences found" in prefs_result:
-                return {
-                    "success": True,
-                    "response": base_response,
-                    "personalized": False,
-                    "reason": "No user preferences available"
-                }
-            
-            # Personalize response based on preferences
-            personalized_response = self._personalize_response(
-                base_response, prefs_result, context
-            )
-            
-            return {
-                "success": True,
-                "response": personalized_response,
-                "personalized": True,
-                "preferences_used": self._extract_preference_signals(prefs_result),
-                "original_response": base_response
-            }
-            
-        except Exception as e:
-            logger.error(f"Error personalizing response: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "response": base_response  # Fallback to original response
             }
     
     def _personalize_response(self, response: str, preferences: str, context: Dict[str, Any]) -> str:

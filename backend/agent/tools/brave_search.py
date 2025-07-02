@@ -27,7 +27,10 @@ class BraveSearchTool(BaseTool):
         api_key = settings.BRAVE_API_KEY
         url = "https://api.search.brave.com/res/v1/web/search"
         headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
-        params = {"q": query}
+        params = {
+            "q": query,
+            "count": 5  # Limit to 5 results to prevent large payloads
+        }
         try:
             response = httpx.get(url, headers=headers, params=params, timeout=10)
             response.raise_for_status()

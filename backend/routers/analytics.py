@@ -34,11 +34,9 @@ async def analyze_data(request: AnalyticsRequest):
     """
     Analyze data and generate insights with optional visualization.
     """
-    logger.info(f"Analyzing data for user: {request.user_id}")
-    
+    logger.info(f"[ANALYTICS] Incoming request: data={request.data}, analysis_type={request.analysis_type}, generate_chart={request.generate_chart}, user_id={request.user_id}")
     try:
         start_time = datetime.utcnow()
-        
         # Analyze data
         analytics_agent = get_analytics_agent()
         result = await analytics_agent.analyze_data(
@@ -46,9 +44,9 @@ async def analyze_data(request: AnalyticsRequest):
             analysis_type=request.analysis_type,
             generate_chart=request.generate_chart
         )
-        
+        # Remove verbose logging of full analytics agent result
+        # logger.info(f"Analytics agent result: {result}")
         process_time = (datetime.utcnow() - start_time).total_seconds()
-        
         if result.get("success", False):
             return {
                 "success": True,
@@ -61,17 +59,11 @@ async def analyze_data(request: AnalyticsRequest):
                 "timestamp": datetime.utcnow().isoformat()
             }
         else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Data analysis failed: {result.get('error', 'Unknown error')}"
-            )
-            
+            logger.info(f"Analytics agent returned failure: {result}")
+            raise HTTPException(status_code=400, detail=result.get("error", "Analysis failed"))
     except Exception as e:
-        logger.error(f"Error analyzing data: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error analyzing data: {str(e)}"
-        )
+        logger.error(f"[ANALYTICS] Exception in analyze_data: {e}")
+        raise
 
 @router.post("/analytics/upload")
 async def upload_and_analyze(

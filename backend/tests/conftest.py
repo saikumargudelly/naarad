@@ -17,9 +17,6 @@ for path in [project_root, backend_dir]:
 # Set PYTHONPATH environment variable
 os.environ['PYTHONPATH'] = os.pathsep.join([project_root, backend_dir] + sys.path[1:])
 
-print(f"Python path: {sys.path}")
-print(f"Working directory: {os.getcwd()}")
-
 # Mock settings before any imports
 class MockSettings:
     DEBUG = True

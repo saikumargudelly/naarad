@@ -7,8 +7,10 @@ import random
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
+import os
 
 from .base import BaseAgent, AgentConfig
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +38,13 @@ class CreativeIdea:
     implementation_steps: List[str]
 
 class CreativityAgent(BaseAgent):
-    """Agent specialized in creative thinking and idea generation."""
-    
-    def __init__(self, config: AgentConfig):
+    """Agent specialized in creative thinking and idea generation.
+    Modular, stateless, and uses injected memory manager for context/state.
+    """
+    def __init__(self, config: AgentConfig, memory_manager: MemoryManager = None):
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"CreativityAgent initialized with memory_manager: {bool(memory_manager)}")
         self.creativity_techniques = self._initialize_creativity_techniques()
         self.idea_templates = self._load_idea_templates()
         self.creative_history = []
@@ -134,43 +139,50 @@ class CreativityAgent(BaseAgent):
             ]
         }
     
-    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """Process creative request and generate innovative ideas."""
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"CreativityAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
-            creativity_type = self._classify_creativity_request(input_text)
-            if creativity_type == CreativityType.BRAINSTORMING:
-                response = await self._generate_brainstorming_ideas(input_text, context)
-            elif creativity_type == CreativityType.STORYTELLING:
-                response = await self._generate_story_ideas(input_text, context)
-            elif creativity_type == CreativityType.PROBLEM_SOLVING:
-                response = await self._generate_solution_ideas(input_text, context)
-            elif creativity_type == CreativityType.ARTISTIC_INSPIRATION:
-                response = await self._generate_artistic_ideas(input_text, context)
-            elif creativity_type == CreativityType.INNOVATION:
-                response = await self._generate_innovation_ideas(input_text, context)
-            else:
-                response = await self._generate_general_creative_ideas(input_text, context)
-            self._update_creative_history(creativity_type, input_text, response)
-            # Contextual follow-up if many ideas/options
-            ideas = response.split('\n') if isinstance(response, str) else []
-            followup = ''
-            if len(ideas) > 6:
-                followup = self._contextual_followup(input_text, ideas, domain='creativity')
-                response += f"\n\n{followup}"
-            return {
-                "success": True,
-                "output": response,
-                "creativity_type": creativity_type.value,
-                "techniques_used": self._get_used_techniques(creativity_type),
-                "agent": "creativity_agent"
-            }
+            chat_history = kwargs.get('chat_history', '')
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Compose a context-aware prompt
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a creative assistant. Use the conversation context, topic, and intent to answer the user's question as creatively and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
+            from langchain_groq import ChatGroq
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from llm.config import settings
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
+            ]
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
         except Exception as e:
-            logger.error(f"Error in creativity processing: {str(e)}", exc_info=True)
+            logger.error(f"Async error in creativity process: {str(e)}", exc_info=True)
             return {
-                "success": False,
-                "output": "Let me think creatively about this...",
-                "error": str(e),
-                "agent": "creativity_agent"
+                'output': f"I encountered an error while processing your creativity request: {str(e)}",
+                'metadata': {
+                    'error': str(e),
+                    'success': False
+                }
             }
     
     def _classify_creativity_request(self, text: str) -> CreativityType:

@@ -24,11 +24,11 @@ class LLMSettings(BaseSettings):
     
     # Model Configuration
     DEFAULT_MODEL: str = Field(
-        default="llama3-70b-8192",
+        default="llama3-8b-8192",
         description="Default model to use for general tasks"
     )
     CHAT_MODEL: str = Field(
-        default="llama3-70b-8192",
+        default="llama3-8b-8192",
         description="Model to use for chat interactions"
     )
     EMBEDDING_MODEL: str = Field(

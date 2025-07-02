@@ -14,7 +14,7 @@ class AgentConfig:
     """Configuration for an agent."""
     name: str
     description: str
-    model_name: str = "llama3-70b-8192"
+    model_name: str = "llama3-8b-8192"
     temperature: float = 0.7
     system_prompt: str = ""
     tools: List[Any] = field(default_factory=list)

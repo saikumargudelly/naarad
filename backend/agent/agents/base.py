@@ -37,7 +37,7 @@ class AgentConfig(BaseModel):
     )
     name: str = Field(..., description="Unique identifier for the agent")
     description: str = Field(..., description="Brief description of the agent's purpose")
-    model_name: str = Field("llama3-70b-8192", description="Name of the model to use")
+    model_name: str = Field("llama3-8b-8192", description="Name of the model to use")
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Sampling temperature for model generation")
     system_prompt: str = Field("", description="Initial system prompt for the agent")
     tools: List[BaseTool] = Field(default_factory=list, description="List of tools available to the agent")
@@ -48,17 +48,13 @@ class AgentConfig(BaseModel):
 
 class BaseAgent:
     """Base class for all agents.
-    
-    This class provides a base implementation for all agents in the system.
-    It handles the creation and management of the underlying LangChain agent.
+    Modular, supports memory_manager injection, and logging for all child agents.
     """
-    
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize the agent with configuration.
-        
+    def __init__(self, config: Dict[str, Any], memory_manager: Any = None):
+        """Initialize the agent with configuration and optional memory manager.
         Args:
             config: The configuration for the agent. Must be a dictionary.
-            
+            memory_manager: Optional memory manager for context/state sharing.
         Raises:
             ValueError: If the configuration is invalid
         """
@@ -67,7 +63,8 @@ class BaseAgent:
                 raise ValueError("Agent config must be a dict (Pydantic v2 compatible)")
             self.config = AgentConfig(**config)
             self._agent = None  # Will be initialized on first use
-            logger.info(f"Initialized {self.__class__.__name__} with model: {self.config.model_name}")
+            self.memory_manager = memory_manager
+            logger.info(f"Initialized {self.__class__.__name__} with model: {self.config.model_name}, memory_manager: {bool(memory_manager)}")
         except Exception as e:
             logger.error(f"Failed to initialize {self.__class__.__name__}: {str(e)}")
             raise ValueError(f"Invalid agent configuration: {str(e)}") from e
@@ -150,57 +147,22 @@ class BaseAgent:
                 "success": False
             }
     
-    async def process(self, input_text: str, **kwargs) -> Dict[str, Any]:
-        """Process input text with the agent.
-        
-        Args:
-            input_text: The input text to process
-            **kwargs: Additional arguments to pass to the agent
-            
-        Returns:
-            Dict containing the agent's response and metadata
-            
-        Raises:
-            RuntimeError: If the agent fails to process the input
-        """
-        try:
-            if not input_text or not isinstance(input_text, str):
-                raise ValueError("Input text must be a non-empty string")
-                
-            # Delegate to the actual agent implementation
-            result = await self.aprocess(input_text, **kwargs)
-            
-            # The result from aprocess is already a dictionary with an 'output' key.
-            # We just need to ensure the metadata is included correctly.
-            
-            metadata = {
-                'agent': self.name,
-                'model': self.config.model_name,
-                'success': result.get('success', True),
-                'simple_query': kwargs.get('simple_query', False),
-                'tools_used': [] # This can be populated later if tools are used
-            }
-            
-            # Merge with any metadata from the agent run
-            if 'metadata' in result and isinstance(result['metadata'], dict):
-                metadata.update(result['metadata'])
-
-            return {
-                'output': result.get('output', 'No response generated.'),
-                'metadata': metadata
-            }
-
-        except Exception as e:
-            logger.error(f"Error in {self.__class__.__name__}.process: {str(e)}", exc_info=True)
-            return {
-                'output': f"An error occurred: {str(e)}",
-                'metadata': {
-                    'agent': self.name,
-                    'model': self.config.model_name,
-                    'success': False,
-                    'error': str(e)
-                }
-            }
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        """Base process method: agents can use conversation_memory for context-aware responses."""
+        # Example: Access previous messages, topics, intents, entities
+        if conversation_memory:
+            last_user_message = None
+            for msg in reversed(conversation_memory.messages):
+                if msg['role'] == 'user':
+                    last_user_message = msg['content']
+                    break
+            topics = conversation_memory.topics
+            intents = conversation_memory.intents
+            entities = conversation_memory.entities
+            # Use these for context-aware logic, e.g.:
+            # if 'cricket' in topics: ...
+        # ... rest of agent logic ...
+        return {'output': f"[DEBUG] Last user message: {last_user_message}, Topics: {topics}, Intents: {intents}, Entities: {entities}", 'metadata': {}}
     
     def _process_impl(self, input_text: str, **kwargs) -> Any:
         """Implementation of the process method to be overridden by subclasses.

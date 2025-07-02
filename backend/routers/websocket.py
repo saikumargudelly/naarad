@@ -13,6 +13,7 @@ import uuid
 from dependencies import get_naarad_agent
 from agent.monitoring.agent_monitor import agent_monitor
 from config.config import settings
+from agent.factory import create_orchestrator_with_agents
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -207,8 +208,7 @@ async def process_streaming_message(
     conversation_id: Optional[str] = None,
     message_type: str = "text"
 ):
-    """Process a message with streaming response."""
-    
+    """Process a message with streaming response using the new orchestrator."""
     # Check debouncing - prevent multiple simultaneous requests
     current_time = time.time()
     if user_id in user_last_request:
@@ -221,48 +221,47 @@ async def process_streaming_message(
                 "timestamp": datetime.utcnow().isoformat()
             }, user_id)
             return
-    
     # Update last request time
     user_last_request[user_id] = current_time
-    
     # Generate conversation ID if not provided
     if not conversation_id:
         conversation_id = f"conv_{uuid.uuid4().hex[:8]}"
         manager.user_conversations[user_id] = conversation_id
-    
     # Send conversation ID to client
     await manager.send_personal_message({
         "type": "conversation_id",
         "conversation_id": conversation_id,
         "timestamp": datetime.utcnow().isoformat()
     }, user_id)
-    
-    # Process with Naarad agent (streaming)
+    # Use orchestrator to process the message
+    orchestrator = create_orchestrator_with_agents()
     try:
-        # For now, we'll simulate streaming by processing in chunks
-        # In a real implementation, you'd integrate with the agent's streaming capabilities
-        
-        agent = get_naarad_agent()
-        async for chunk in agent.process_with_streaming(
-            message=message,
+        # Optionally, you can add more context here
+        context = {}
+        result = await orchestrator.process_query(
+            user_input=message,
+            context=context,
             conversation_id=conversation_id,
-            user_id=user_id,
-            message_type=message_type
-        ):
-            await manager.send_personal_message(chunk, user_id)
-        
-        # Send completion message
+            user_id=user_id
+        )
+        # Send the result back to the user
+        await manager.send_personal_message({
+            "type": "message",
+            "content": result.get("output", "No response generated."),
+            "agent": result.get("agent_used", "orchestrator"),
+            "metadata": result.get("metadata", {}),
+            "timestamp": datetime.utcnow().isoformat()
+        }, user_id)
         await manager.send_personal_message({
             "type": "message_complete",
             "conversation_id": conversation_id,
             "timestamp": datetime.utcnow().isoformat()
         }, user_id)
-        
     except Exception as e:
-        logger.error(f"Error in streaming message processing: {e}", exc_info=True)
+        logger.error(f"Error in orchestrator processing: {e}", exc_info=True)
         await manager.send_personal_message({
             "type": "error",
-            "error": f"Failed to process message: {str(e)}",
+            "error": f"An error occurred while processing your message: {str(e)}",
             "timestamp": datetime.utcnow().isoformat()
         }, user_id)
 

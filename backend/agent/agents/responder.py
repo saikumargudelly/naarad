@@ -17,21 +17,21 @@ from langchain_core.runnables import RunnablePassthrough
 # Local imports
 from .base import BaseAgent, AgentConfig
 from llm.config import settings
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
 class ResponderAgent(BaseAgent):
     """Agent specialized in generating friendly and helpful responses.
-    
-    This agent handles general conversations and simple queries without requiring
-    external tools. It's optimized for quick responses to common queries.
+    Modular, stateless, and uses injected memory manager for context/state.
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], memory_manager: MemoryManager = None):
         """Initialize the responder agent with configuration.
         
         Args:
             config: The configuration for the agent. Must be a dictionary.
+            memory_manager: The memory manager for the agent.
         """
         routing_info = config.get('routing_info', {}) if isinstance(config, dict) else {}
         intent = routing_info.get('intent', 'unknown')
@@ -112,6 +112,8 @@ If the query is outside your responder domain or the intent confidence is low, e
         default_config.update(config)
         config = default_config
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"ResponderAgent initialized with memory_manager: {bool(memory_manager)}")
         
     def _is_simple_query(self, query: str) -> bool:
         """Check if the query is simple enough to handle without tools.
@@ -209,55 +211,47 @@ If the query is outside your responder domain or the intent confidence is low, e
             
             return LLMChain(llm=llm, prompt=prompt)
     
-    def _process_impl(self, input_text: str, **kwargs) -> Dict[str, Any]:
-        """Process input with the responder agent.
-        
-        Args:
-            input_text: The input text to respond to
-            **kwargs: Additional keyword arguments
-            
-        Returns:
-            Dict containing the response and metadata
-        """
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"ResponderAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
-            # Convert input to lowercase for case-insensitive matching
-            input_lower = input_text.lower().strip()
-            
-            # Check for simple queries first
-            for key, responses in self.simple_queries.items():
-                if key in input_lower:
-                    return {
-                        'output': random.choice(responses),
-                        'metadata': {
-                            'agent': self.config.name,
-                            'model': self.config.model_name,
-                            'source': 'simple_query',
-                            'confidence': 0.9
-                        }
-                    }
-            
-            # For other queries, generate a response using the agent
-            agent = self.agent
-            result = agent.invoke({
-                'input': input_text,
-                'chat_history': kwargs.get('chat_history', [])
-            })
-            
-            # Extract the output from the result
-            if isinstance(result, dict) and 'output' in result:
-                output = result['output']
-            elif isinstance(result, str):
-                output = result
-            else:
-                output = str(result)
-            
+            chat_history = kwargs.get('chat_history', '')
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Compose a context-aware prompt
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a helpful, context-aware assistant. Use the conversation context, topic, and intent to answer the user's question as accurately and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
+            from langchain_groq import ChatGroq
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from llm.config import settings
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
+            ]
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
         except Exception as e:
-            logger.error(f"Error in responder agent: {str(e)}", exc_info=True)
+            logger.error(f"Async error in responder process: {str(e)}", exc_info=True)
             return {
-                'output': "I'm sorry, I encountered an error while processing your request. Please try again.",
-                'error': str(e),
+                'output': f"I encountered an error while processing your request: {str(e)}",
                 'metadata': {
-                    'agent': self.name,
                     'error': str(e),
                     'success': False
                 }

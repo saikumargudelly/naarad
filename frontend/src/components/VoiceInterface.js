@@ -21,7 +21,9 @@ const VoiceInterface = ({
   isProcessing = false,
   voiceEnabled = true,
   onToggleVoice,
-  className = ""
+  className = "",
+  userId = "current_user",
+  conversationId = null
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState(null);
@@ -141,35 +143,34 @@ const VoiceInterface = ({
   const processAudioInput = async (blob) => {
     try {
       setProcessingStatus('Transcribing audio...');
-      
       // Convert blob to base64
       const arrayBuffer = await blob.arrayBuffer();
       const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-      
+      // Build request body
+      const requestBody = {
+        audio_data: base64Audio,
+        user_id: userId,
+        voice_preference: selectedVoice,
+        generate_audio: true
+      };
+      if (conversationId) {
+        requestBody.conversation_id = conversationId;
+      }
       // Send to backend
       const response = await fetch('/api/v1/voice/process', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          audio_data: base64Audio,
-          user_id: 'current_user', // Replace with actual user ID
-          voice_preference: selectedVoice,
-          generate_audio: true
-        })
+        body: JSON.stringify(requestBody)
       });
-
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-
       const result = await response.json();
-      
       if (result.success) {
         setTranscription(result.transcribed_text);
         setProcessingStatus('Transcription complete');
-        
         if (onVoiceInput) {
           onVoiceInput({
             type: 'transcription_complete',

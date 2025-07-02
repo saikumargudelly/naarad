@@ -1,16 +1,18 @@
 """Chat router for handling chat-related endpoints."""
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, WebSocket
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Optional, Dict, Any, Annotated
 import logging
 from datetime import datetime, timedelta
+import json
 
 # Import compatibility layer
 from agent.compat import get_rate_limiter, create_compatible_model_config
 
 from dependencies import get_naarad_agent
 from config.config import settings
+from agent.factory import create_orchestrator_with_agents
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -76,47 +78,32 @@ async def chat(
     Process a chat message and return Naarad's response.
     Rate limited to 100 requests per minute per IP.
     """
-    logger.info(f"Processing chat request: {chat_request.message[:100]}...")
-    
+    logger.info(f"[CHAT] Incoming REST chat request: {chat_request}")
     try:
         start_time = datetime.utcnow()
-        
-        agent = get_naarad_agent()
-        response = await agent.process_message(
-            message=chat_request.message,
-            images=chat_request.images,
-            chat_history=chat_request.chat_history
+        orchestrator = create_orchestrator_with_agents()
+        # Optionally, you can add more context here
+        context = {}
+        user_id = request.headers.get("X-User-Id", "default")
+        conversation_id = chat_request.conversation_id or f"conv_{user_id}_{start_time.timestamp()}"
+        result = await orchestrator.process_query(
+            user_input=chat_request.message,
+            context=context,
+            conversation_id=conversation_id,
+            user_id=user_id
         )
-        
         process_time = (datetime.utcnow() - start_time).total_seconds()
-        logger.info(f"Chat processed in {process_time:.2f}s")
-        
-        # Extract the actual message from the response structure
-        if isinstance(response, dict):
-            # The response from naarad_agent contains the message in 'response.output'
-            if 'response' in response and isinstance(response['response'], dict) and 'output' in response['response']:
-                message = response['response']['output']
-            # Fallback for older or direct message formats
-            elif 'message' in response:
-                message = response['message']
-            elif 'text' in response:
-                message = response['text']
-            elif 'output' in response:
-                message = response['output']
-            else:
-                # If no clear message field, stringify for debugging
-                message = str(response)
-        else:
-            message = str(response)
-        
-        return {
+        message = result.get("output", "No response generated.")
+        response = {
             "message": message,
-            "conversation_id": chat_request.conversation_id or "",
+            "conversation_id": conversation_id,
             "sources": [],
             "processing_time": f"{process_time:.2f}s"
         }
+        logger.info(f"[CHAT] REST chat response: {response}")
+        return response
     except Exception as e:
-        logger.error(f"Error processing chat: {str(e)}", exc_info=True)
+        logger.error(f"[CHAT] REST chat exception: {e}")
         raise HTTPException(
             status_code=500,
             detail="An error occurred while processing your request"
@@ -130,3 +117,54 @@ async def health_check():
         "service": "naarad-chat",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@router.websocket("/ws/chat/{user_id}/{conversation_id}")
+async def websocket_chat(websocket: WebSocket, user_id: str, conversation_id: str):
+    logger.info(f"[WEBSOCKET] Connection opened | user_id: {user_id} | conversation_id: {conversation_id}")
+    await websocket.accept()
+    try:
+        orchestrator = create_orchestrator_with_agents()
+        while True:
+            data = await websocket.receive_text()
+            logger.info(f"[WEBSOCKET] Received message: {data} | user_id: {user_id} | conversation_id: {conversation_id}")
+            try:
+                msg = json.loads(data)
+                user_message = msg.get("message", "")
+                context = {}
+                # Pass timestamp from frontend if present
+                if "timestamp" in msg:
+                    context["timestamp"] = msg["timestamp"]
+                logger.info(f"[WEBSOCKET] Calling orchestrator.process | user_input: {user_message} | context: {context} | conversation_id: {conversation_id} | user_id: {user_id}")
+                try:
+                    result = await orchestrator.process_query(
+                        user_input=user_message,
+                        context=context,
+                        conversation_id=conversation_id,
+                        user_id=user_id
+                    )
+                    logger.info(f"[WEBSOCKET] Orchestrator result: {result} | user_id: {user_id} | conversation_id: {conversation_id}")
+                    response = {
+                        "type": "message",
+                        "content": result.get("output", "No response generated."),
+                        "conversation_id": conversation_id
+                    }
+                except Exception as orchestrator_exc:
+                    logger.error(f"[WEBSOCKET] Orchestrator exception: {orchestrator_exc}", exc_info=True)
+                    response = {
+                        "type": "error",
+                        "error": f"Orchestrator error: {str(orchestrator_exc)}",
+                        "conversation_id": conversation_id
+                    }
+                await websocket.send_text(json.dumps(response))
+                logger.info(f"[WEBSOCKET] Sent response: {response} | user_id: {user_id} | conversation_id: {conversation_id}")
+            except Exception as e:
+                logger.error(f"[WEBSOCKET] Exception during message processing: {e}", exc_info=True)
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "error": str(e),
+                    "conversation_id": conversation_id
+                }))
+    except Exception as e:
+        logger.error(f"[WEBSOCKET] Exception: {e} | user_id: {user_id} | conversation_id: {conversation_id}", exc_info=True)
+    finally:
+        logger.info(f"[WEBSOCKET] Connection closed | user_id: {user_id} | conversation_id: {conversation_id}")

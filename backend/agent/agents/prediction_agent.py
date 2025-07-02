@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from enum import Enum
 import statistics
 import math
+import os
 
 from .base import BaseAgent, AgentConfig
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +51,17 @@ class TrendAnalysis:
     forecast_periods: List[Dict[str, Any]]
 
 class PredictionAgent(BaseAgent):
-    """Agent specialized in pattern analysis and prediction making."""
-    
-    def __init__(self, config: AgentConfig):
+    """Agent specialized in pattern analysis and prediction making.
+    Modular, stateless, and uses injected memory manager for context/state.
+    """
+    def __init__(self, config: AgentConfig, memory_manager: MemoryManager = None):
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"PredictionAgent initialized with memory_manager: {bool(memory_manager)}")
         self.prediction_methods = self._initialize_prediction_methods()
         self.forecast_templates = self._load_forecast_templates()
         self.prediction_history = []
-        
+    
     def _initialize_prediction_methods(self) -> Dict[str, Dict[str, Any]]:
         """Initialize various prediction and forecasting methods."""
         return {
@@ -143,46 +148,50 @@ class PredictionAgent(BaseAgent):
             ]
         }
     
-    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """Process prediction request and generate forecasts."""
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"PredictionAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
-            prediction_type = self._classify_prediction_request(input_text)
-            if prediction_type == PredictionType.TREND_FORECASTING:
-                response = await self._generate_trend_forecast(input_text, context)
-            elif prediction_type == PredictionType.PATTERN_ANALYSIS:
-                response = await self._generate_pattern_analysis(input_text, context)
-            elif prediction_type == PredictionType.RISK_ASSESSMENT:
-                response = await self._generate_risk_assessment(input_text, context)
-            elif prediction_type == PredictionType.OPPORTUNITY_IDENTIFICATION:
-                response = await self._generate_opportunity_forecast(input_text, context)
-            elif prediction_type == PredictionType.BEHAVIORAL_PREDICTION:
-                response = await self._generate_behavioral_forecast(input_text, context)
-            elif prediction_type == PredictionType.MARKET_ANALYSIS:
-                response = await self._generate_market_analysis(input_text, context)
-            else:
-                response = await self._generate_general_prediction(input_text, context)
-            self._update_prediction_history(prediction_type, input_text, response)
-            # Contextual follow-up if multiple predictions/scenarios
-            preds = response.split('\n') if isinstance(response, str) else []
-            followup = ''
-            if len(preds) > 4:
-                followup = self._contextual_followup(input_text, preds, domain='prediction')
-                response += f"\n\n{followup}"
-            return {
-                "success": True,
-                "output": response,
-                "prediction_type": prediction_type.value,
-                "methods_used": self._get_used_methods(prediction_type),
-                "confidence_metrics": self._calculate_confidence_metrics(prediction_type),
-                "agent": "prediction_agent"
-            }
+            chat_history = kwargs.get('chat_history', '')
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Compose a context-aware prompt
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a prediction assistant. Use the conversation context, topic, and intent to answer the user's question as accurately and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
+            from langchain_groq import ChatGroq
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from llm.config import settings
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
+            ]
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
         except Exception as e:
-            logger.error(f"Error in prediction processing: {str(e)}", exc_info=True)
+            logger.error(f"Async error in prediction process: {str(e)}", exc_info=True)
             return {
-                "success": False,
-                "output": "Let me analyze the patterns and make some predictions...",
-                "error": str(e),
-                "agent": "prediction_agent"
+                'output': f"I encountered an error while processing your prediction request: {str(e)}",
+                'metadata': {
+                    'error': str(e),
+                    'success': False
+                }
             }
     
     def _classify_prediction_request(self, text: str) -> PredictionType:

@@ -55,6 +55,11 @@ class Settings(BaseSettings):
         default=None,
         description="API key for Brave Search"
     )
+    # GNews API
+    GNEWS_API_KEY: Optional[str] = Field(
+        default=None,
+        description="API key for GNews"
+    )
     
     # --- Server Configuration ---
     ENVIRONMENT: Environment = Field(
@@ -149,4 +154,3 @@ class Settings(BaseSettings):
     )
 
 settings = Settings()
-print(f"DEBUG: settings.CHAT_MODEL={settings.CHAT_MODEL}, settings.REASONING_MODEL={settings.REASONING_MODEL}")

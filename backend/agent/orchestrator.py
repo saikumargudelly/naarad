@@ -11,6 +11,8 @@ import re
 from dateutil import parser as date_parser
 import dateutil.relativedelta
 import pytz
+import os
+from collections import OrderedDict
 
 # LangChain imports
 from langchain.agents import AgentExecutor
@@ -23,6 +25,7 @@ from .memory.memory_manager import memory_manager
 from .monitoring.agent_monitor import agent_monitor
 from .types import BaseAgent, AgentConfig
 from .tools.brave_search import BraveSearchTool
+from .memory.conversation_memory import ConversationMemory
 
 # Lazy imports to avoid circular dependencies
 _domain_agents = None
@@ -35,6 +38,11 @@ def _get_domain_agents():
     return _domain_agents
 
 logger = logging.getLogger(__name__)
+
+class OrchestratorAgent:
+    def __init__(self, agents: Dict[str, Any], memory_manager, metrics=None, router=None):
+        ...
+    # All methods, logger lines, and comments for OrchestratorAgent
 
 class AgentOrchestrator:
     def __init__(self, base_agents: Dict[str, AgentExecutor] = None, metrics=None, router=None):
@@ -54,6 +62,12 @@ class AgentOrchestrator:
         self.metrics = metrics  # For testability/monitoring
         self.router = router    # For testability
         # self.health_status = 'ok'  # For health endpoint
+        # Load semantic model for filtering
+        try:
+            from sentence_transformers import SentenceTransformer, util
+            self._semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+        except ImportError:
+            self._semantic_model = None
     
     async def process_query(
         self, 
@@ -211,10 +225,10 @@ class AgentOrchestrator:
                 multi_agent = True
             if multi_agent:
                 # Determine all relevant agents
-                agent_names = set([await self._select_agent_by_intent(intent, context)])
+                agent_names = set([await self._select_agent_by_intent(intent, context, user_input)])
                 for alt_intent, alt_conf in strong_alts:
                     alt_intent_str = alt_intent.value if hasattr(alt_intent, 'value') else str(alt_intent)
-                    agent_names.add(await self._select_agent_by_intent(alt_intent_str, context))
+                    agent_names.add(await self._select_agent_by_intent(alt_intent_str, context, user_input))
                 # Remove duplicates and responder (unless only fallback)
                 agent_names = [a for a in agent_names if a != 'responder'] or ['responder']
                 collaborative_agents = list(agent_names)
@@ -317,7 +331,7 @@ class AgentOrchestrator:
                     }
             
             # 1. Analyze context and determine the best agent(s) to handle the query
-            agent_name = await self._select_agent_by_intent(intent, context)
+            agent_name = await self._select_agent_by_intent(intent, context, user_input)
             context['trace'].append({'step': 'agent_selection', 'agent': agent_name, 'timestamp': datetime.datetime.utcnow().isoformat()})
             
             # 2. Process with the selected agent(s)
@@ -416,7 +430,7 @@ class AgentOrchestrator:
                 'timestamp': datetime.datetime.utcnow().isoformat()
             })
             context['trace'] = trace
-            primary_agent = await self._select_agent_by_intent(intent, context)
+            primary_agent = await self._select_agent_by_intent(intent, context, user_input)
             context['trace'].append({'step': 'agent_selection', 'agent': primary_agent, 'timestamp': datetime.datetime.utcnow().isoformat()})
             # Yield typing start indicator
             yield {"type": "typing_start", "agent": primary_agent}
@@ -459,60 +473,37 @@ class AgentOrchestrator:
                 "conversation_id": conversation_id
             }
     
-    async def _select_agent_by_intent(self, intent: str, context: Dict[str, Any]) -> str:
-        """Select agent based only on intent, fallback to keyword checks if needed."""
-        # Map intent to agent
-        intent_to_agent = {
-            'reminder': 'task_manager',
-            'calendar': 'task_manager',
-            'task': 'task_manager',
-            'creative_writing': 'creative_writer',
-            'story': 'creative_writer',
-            'narrative': 'creative_writer',
-            'analysis': 'analyst',
+    async def _select_agent_by_intent(self, intent: str, context: Dict[str, Any], user_input: str) -> str:
+        """Select the best agent for the given intent, with minimal keyword-based fallback for 'unknown' intent only."""
+        # Minimal fallback for 'unknown' intent
+        if intent == "unknown":
+            realtime_keywords = [
+                "news", "headline", "current event", "breaking", "top", "latest", "update", "today", "now", "search", "find", "lookup", "web", "internet", "article", "report", "trend",
+                "match", "game", "score", "schedule", "event", "when is", "next", "upcoming", "live", "result", "fixture", "tournament", "series", "cricket", "football", "olympics", "world cup", "sports"
+            ]
+            user_input_lc = user_input.lower() if isinstance(user_input, str) else ''
+            if any(kw in user_input_lc for kw in realtime_keywords):
+                return "researcher"
+        # Standard mapping
+        mapping = {
             'research': 'researcher',
-            'investigation': 'analyst',
-            'conversation': 'context_manager',
-            'context': 'context_manager',
-            'follow_up': 'context_manager',
-            'emotion': 'emotion_agent',
-            'feeling': 'emotion_agent',
-            'mood': 'emotion_agent',
-            'empathy': 'emotion_agent',
-            'creativity': 'creativity_agent',
-            'brainstorm': 'creativity_agent',
-            'ideas': 'creativity_agent',
-            'innovation': 'creativity_agent',
-            'prediction': 'prediction_agent',
-            'forecast': 'prediction_agent',
-            'trend': 'prediction_agent',
-            'pattern': 'prediction_agent',
-            'learning': 'learning_agent',
-            'improve': 'learning_agent',
-            'adapt': 'learning_agent',
-            'feedback': 'learning_agent',
-            'quantum': 'quantum_agent',
-            'superposition': 'quantum_agent',
-            'entanglement': 'quantum_agent',
-            'quantum_computing': 'quantum_agent',
             'search': 'researcher',
-            'general': 'responder',
-            'greeting': 'responder',
-            'unknown': 'responder',
+            'analyze': 'analyst',
+            'personalize': 'personalization_agent',
+            'predict': 'prediction_agent',
+            'learn': 'learning_agent',
+            'quantum': 'quantum_agent',
+            'creativity': 'creativity_agent',
+            'emotion': 'emotion_agent',
+            'quality': 'quality_agent',
+            'voice': 'voice_agent',
+            'analytics': 'analytics_agent',
+            'respond': 'responder',
         }
-        agent_name = intent_to_agent.get(intent, None)
-        if agent_name:
-            return agent_name
-        # Fallback: keyword checks (legacy)
-        user_input_lower = context.get('input_text', '').lower() if 'input_text' in context else ''
-        if any(word in user_input_lower for word in ['search', 'find', 'look up', 'google', 'research', 'investigate', 'what is', 'who is', 'where is', 'when is', 'how to']):
-            return 'researcher'
-        if any(word in user_input_lower for word in ['analyze', 'investigate', 'examine', 'study']):
-            return 'analyst'
-        return 'responder'
+        return mapping.get(intent, 'responder')
     
     def _is_realtime_query(self, user_input: str) -> bool:
-        """Detect if the query is about real-time/current information (news, weather, scores, finance, live events, etc.)."""
+        logger.info(f"[DEBUG] _is_realtime_query called with: {user_input}")
         user_input_lower = user_input.lower().strip()
         # Core keywords and phrases
         realtime_keywords = [
@@ -538,17 +529,20 @@ class AgentOrchestrator:
             r"who (won|is winning|scored|is leading|took the wicket|scored the goal|scored the run)",
             r"show me (the|all)? (latest|news|results|scores|updates|trends|prices|standings|fixtures|schedule|weather|temperature)",
             r"tell me (the|all)? (latest|news|results|scores|updates|trends|prices|standings|fixtures|schedule|weather|temperature)",
-            r"give me (the|all)? (latest|news|results|scores|updates|trends|prices|standings|fixtures|schedule|weather|temperature)",
+            r"give me (me )?(now|today|live|latest|current)[\?\.! ]*$",
             r".*\b(live|breaking|just in|ongoing|current|today|now)\b.*",
         ]
         # Keyword/phrase match
         for kw in realtime_keywords:
             if kw in user_input_lower:
+                logger.info(f"[DEBUG] _is_realtime_query returning True (matched keyword: {kw})")
                 return True
         # Regex pattern match
         for pat in realtime_patterns:
             if re.search(pat, user_input_lower):
+                logger.info(f"[DEBUG] _is_realtime_query returning True (matched pattern: {pat})")
                 return True
+        logger.info(f"[DEBUG] _is_realtime_query returning False")
         return False
     
     def _extract_date(self, text: str) -> datetime.datetime:
@@ -618,7 +612,7 @@ class AgentOrchestrator:
         return text
 
     def _should_force_realtime(self, user_input: str) -> bool:
-        """Detect if the user is clarifying for real-time data in a follow-up."""
+        logger.info(f"[DEBUG] _should_force_realtime called with: {user_input}")
         # Expanded list of clarifiers and expressions
         realtime_clarifiers = [
             'today', 'live', 'current', 'ongoing', 'now', 'latest', 'recent', 'right now', 'just now',
@@ -641,6 +635,7 @@ class AgentOrchestrator:
         # Keyword/phrase match
         for kw in realtime_clarifiers:
             if kw in user_input_lower:
+                logger.info(f"[DEBUG] _should_force_realtime returning True (matched clarifier: {kw})")
                 return True
         # Regex patterns for short/ambiguous real-time follow-ups
         realtime_followup_patterns = [
@@ -653,7 +648,9 @@ class AgentOrchestrator:
         ]
         for pat in realtime_followup_patterns:
             if re.match(pat, user_input_lower):
+                logger.info(f"[DEBUG] _should_force_realtime returning True (matched pattern: {pat})")
                 return True
+        logger.info(f"[DEBUG] _should_force_realtime returning False")
         return False
     
     def _extract_entities(self, text: str) -> dict:
@@ -685,16 +682,82 @@ class AgentOrchestrator:
     # --- Contextual Query Builder ---
     def _build_contextual_query(self, user_input: str, context: dict) -> str:
         """
-        If this is a follow-up/real-time query, merge with last known entities to build a specific Brave query.
+        Dynamically build a concise, optimized query for real-time search APIs.
+        - Use all extracted entities (teams, event, location, date, etc.)
+        - Leverage detected intent and previous conversation context
+        - Remove stopwords and redundant words
+        - Truncate to 100 chars at word boundaries
+        - Designed for future extensibility (e.g., custom entity types, domain-specific logic)
         """
-        if self._should_force_realtime(user_input) or self._is_realtime_query(user_input):
-            entities = context.get('metadata', {}).get('entities', {})
-            context_str = ' '.join(
-                filter(None, [entities.get('sport', ''), ' vs '.join(entities.get('teams', [])), entities.get('event', ''), entities.get('date', '')])
-            ).strip()
-            if context_str:
-                return f"{context_str} {user_input}".strip()
-        return user_input
+        import datetime, re
+        from collections import OrderedDict
+
+        year = str(datetime.datetime.now().year)
+        entities = context.get('metadata', {}).get('entities', {})
+        intent = context.get('routing_info', {}).get('intent', '')
+        prev_context = context.get('previous_user_inputs', [])
+
+        # Gather all possible keywords/entities
+        keywords = []
+
+        # Add all entity values dynamically (future-proof: supports any entity type)
+        for key, value in entities.items():
+            if value:
+                if isinstance(value, list):
+                    keywords.extend([str(v) for v in value])
+                else:
+                    keywords.append(str(value))
+
+        # Add intent if it's not generic
+        if intent and intent not in ['unknown', 'general', 'other'] and intent not in keywords:
+            keywords.append(intent)
+
+        # Add previous context if available (last 2 user turns)
+        for prev in prev_context[-2:]:
+            prev_words = [w for w in re.findall(r'\w+', prev.lower()) if len(w) > 2]
+            keywords.extend(prev_words)
+
+        # Add user input words, excluding stopwords
+        stopwords = set([
+            'the', 'is', 'in', 'at', 'on', 'for', 'to', 'of', 'and', 'a', 'an', 'with', 'between',
+            'show', 'me', 'check', 'find', 'tell', 'give', 'now', 'today', 'upcoming', 'please', 'can', 'could', 'would', 'should', 'when', 'where', 'how', 'what', 'which', 'who', 'whom', 'whose', 'about', 'from', 'by', 'as', 'it', 'this', 'that', 'these', 'those', 'do', 'does', 'did', 'will', 'shall', 'may', 'might', 'must', 'let', 'us', 'want', 'like', 'need', 'get', 'see', 'latest', 'current', 'recent', 'news', 'info', 'information', 'details', 'update', 'updates', 'result', 'results', 'report', 'reports', 'event', 'events', 'schedule', 'schedules', 'match', 'matches', 'game', 'games', 'score', 'scores', 'live', 'today', 'now', 'upcoming', 'next', 'year', 'month', 'week', 'day', 'date', 'time', 'vs', 'vs.'
+        ])
+        user_words = [w for w in re.findall(r'\w+', user_input.lower()) if w not in stopwords and len(w) > 2]
+        keywords.extend(user_words)
+
+        # Remove duplicates, preserve order
+        keywords = list(OrderedDict.fromkeys(keywords))
+
+        # Always add year if not present
+        if year not in keywords:
+            keywords.append(year)
+
+        # Build query string
+        query = ' '.join(keywords)
+        query = query.replace('"', '').replace("'", '').strip()
+        query = re.sub(r'\s+', ' ', query)
+
+        # Truncate at word boundary
+        if len(query) > 100:
+            query = query[:100]
+            if ' ' in query:
+                query = query[:query.rfind(' ')]
+
+        logger.info(f"[RealTime] Dynamic search query: {query}")
+        return query
+
+    # --- Context Updater for Previous User Inputs ---
+    def _update_context_with_user_input(self, context: dict, user_input: str) -> dict:
+        """
+        Update the context with the latest user input for richer, multi-turn query construction.
+        Maintains a rolling window of previous user inputs (last 5 turns).
+        """
+        prev_inputs = context.get('previous_user_inputs', [])
+        prev_inputs.append(user_input)
+        if len(prev_inputs) > 5:
+            prev_inputs = prev_inputs[-5:]
+        context['previous_user_inputs'] = prev_inputs
+        return context
 
     async def _route_to_agent(
         self,
@@ -706,265 +769,348 @@ class AgentOrchestrator:
         supporting_agents: List[str] = None,
         fallback_agent: str = None
     ) -> Dict[str, Any]:
-        """Route the query to the appropriate agent with enhanced error handling and fallback support.
-        
-        Args:
-            agent_name: Primary agent to handle the request
-            user_input: The user's input text
-            context: Additional context including any files or metadata
-            conversation_id: ID of the current conversation
-            user_id: ID of the current user
-            supporting_agents: List of additional agents that can assist if the primary agent needs help
-            fallback_agent: Optional fallback agent to try if all other agents fail
-            
-        Returns:
-            Dict containing the response and metadata
-        """
-        logger.info(f"[Orchestrator] Routing to agent: {agent_name}" +
-                   (f" with {len(supporting_agents or [])} supporting agents" if supporting_agents else ""))
-        
-        supporting_agents = supporting_agents or []
-        start_time = time.time()
-        
-        # Prepare context with routing information
-        context = context.copy()
-        context['routing'] = {
-            'primary_agent': agent_name,
-            'supporting_agents': supporting_agents,
-            'attempt_time': datetime.datetime.utcnow().isoformat()
-        }
-        
-        # Special handling for specific agent types
-        # --- Always use Brave Search for real-time queries ---
-        force_realtime = self._is_realtime_query(user_input) or self._should_force_realtime(user_input)
-        if force_realtime:
-            brave_tool = BraveSearchTool()
-            # --- Use context to augment Brave query for follow-ups ---
-            query = self._build_contextual_query(user_input, context)
-            if not any(kw in query.lower() for kw in ['today', 'live', 'current', 'now']):
-                query += ' today'
-            brave_result = await brave_tool._arun(query)
-            if isinstance(brave_result, dict) and 'error' not in brave_result:
-                web_results = brave_result.get('web', {}).get('results', [])
-                # Sort/filter by date if possible
-                dated_results = []
-                for item in web_results:
-                    # Try to extract date from snippet, title, or url
-                    date_candidates = [item.get('description', ''), item.get('title', ''), item.get('url', '')]
-                    item_date = None
-                    for candidate in date_candidates:
-                        d = self._extract_date(candidate)
-                        if d:
-                            item_date = d
-                            break
-                    if item_date:
-                        dated_results.append((item_date, item))
-                # If we found any dated results, sort by date (descending)
-                if dated_results:
-                    dated_results.sort(reverse=True, key=lambda x: x[0])
-                    web_results = [item for _, item in dated_results]
-                # Try to find today's result
-                today = datetime.datetime.now().date()
-                top = None
-                for item in web_results:
-                    for candidate in [item.get('description', ''), item.get('title', ''), item.get('url', '')]:
-                        d = self._extract_date(candidate)
-                        if d and d.date() == today:
-                            top = item
-                            break
-                    if top:
-                        break
-                # If no 'today' result, offer most recent and inform user
-                if not top and web_results:
-                    top = web_results[0]
-                    # Find date for most recent
-                    most_recent_date = None
-                    for candidate in [top.get('description', ''), top.get('title', ''), top.get('url', '')]:
-                        d = self._extract_date(candidate)
-                        if d:
-                            most_recent_date = d.date()
-                            break
-                    date_str = f" (most recent: {most_recent_date})" if most_recent_date else " (most recent)"
-                    output = f"No results found for today. Showing the most recent result{date_str}:\n\n**{top.get('title', 'Result')}**\n{top.get('description', '')}\n{top.get('url', '')}"
-                elif top:
-                    output = f"**{top.get('title', 'Result')}**\n{top.get('description', '')}\n{top.get('url', '')}"
-                else:
-                    output = "No relevant results found from Brave Search."
-                # Contextual follow-up logic
-                followup = ""
-                if len(web_results) > 1:
-                    q = user_input.lower()
-                    titles = ' '.join([r.get('title', '').lower() for r in web_results[:5]])
-                    followup_options = []
-                    if any(x in q or x in titles for x in ['women', "women's"]):
-                        followup_options.append("Do you want Women's or Men's match?")
-                    elif 'men' in q or "men's" in titles:
-                        followup_options.append("Do you want Men's or Women's match?")
-                    if 'highlight' in q or 'highlight' in titles:
-                        followup_options.append("Are you looking for highlights or live scorecard?")
-                    if 'score' in q or 'live' in q or 'scorecard' in titles:
-                        followup_options.append("Do you want the live score, full scorecard, or match summary?")
-                    if not followup_options:
-                        followup_options.append("Can you specify if you want news, scores, weather, or something else? Or would you like to see more results?")
-                    followup = '\n\n' + ' '.join(followup_options)
-                # CLEANING STEP: Remove duplicate words/phrases from both output and followup
-                output = self._remove_duplicate_words(output)
-                followup = self._remove_duplicate_words(followup)
-                output += followup
-                # --- LLM-based relevance extraction for Brave Search output ---
+        try:
+            logger.info(f"[Orchestrator] Routing to agent: {agent_name}" +
+                       (f" with {len(supporting_agents or [])} supporting agents" if supporting_agents else ""))
+            supporting_agents = supporting_agents or []
+            start_time = time.time()
+            context = context.copy()
+            context['routing'] = {
+                'primary_agent': agent_name,
+                'supporting_agents': supporting_agents,
+                'attempt_time': datetime.datetime.utcnow().isoformat()
+            }
+            # --- Robust Real-Time Routing for ALL Agents ---
+            # Enhanced: Always try Brave/GNews for real-time and recommendation-related intents
+            real_time_intents = [
+                'weather', 'sports', 'news', 'trending', 'recommendation', 'music', 'movie', 'entertainment',
+                'prediction', 'search', 'event', 'analytics', 'quality', 'calendar', 'reminder'
+            ]
+            intent = context.get('routing_info', {}).get('intent', '')
+            force_realtime = (
+                self._is_realtime_query(user_input) or
+                self._should_force_realtime(user_input) or
+                intent in real_time_intents
+            )
+            if force_realtime:
+                query = self._build_contextual_query(user_input, context)
+                logger.info(f"[RealTime] Real-time query constructed: {query}")
+                gnews_result, brave_result = None, None
+                articles, web_results = [], []
+                brave_summary = None
                 try:
-                    output = await self._extract_relevant_text_with_llm(user_input, output)
+                    from .tools.gnews_search import GNewsSearchTool
+                    gnews_tool = GNewsSearchTool()
+                    gnews_result = await gnews_tool._arun(query)
+                    if 'error' in gnews_result:
+                        logger.warning(f"[RealTime] GNews API error: {gnews_result['error']}")
+                    articles = gnews_result.get('articles', []) if gnews_result else []
                 except Exception as e:
-                    logger.warning(f"LLM relevance extraction failed: {e}")
+                    logger.error(f"[RealTime] Exception during GNews search: {e}", exc_info=True)
+                try:
+                    from .tools.brave_search import BraveSearchTool
+                    brave_tool = BraveSearchTool()
+                    brave_result = await brave_tool._arun(query)
+                    if 'error' in brave_result:
+                        logger.warning(f"[RealTime] Brave API error: {brave_result['error']}")
+                    web_results = brave_result.get('web', {}).get('results', []) if isinstance(brave_result, dict) else []
+                    # Check for a direct answer or summary in Brave's response
+                    brave_summary = brave_result.get('summary') if isinstance(brave_result, dict) else None
+                    if not brave_summary and web_results:
+                        # Try to extract a summary-like paragraph from the first result
+                        first = web_results[0]
+                        brave_summary = first.get('description') or first.get('snippet')
+                except Exception as e:
+                    logger.error(f"[RealTime] Exception during Brave search: {e}", exc_info=True)
+                now = datetime.datetime.now()
+                filtered_articles = []
+                for a in articles:
+                    date_str = a.get('publishedAt') or a.get('date') or ''
+                    try:
+                        article_date = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00')) if date_str else None
+                    except Exception:
+                        article_date = None
+                    if article_date and (article_date.year == now.year or (now - article_date).days <= 180):
+                        filtered_articles.append(a)
+                filtered_results = []
+                for r in web_results:
+                    date_str = r.get('datePublished') or r.get('date') or ''
+                    try:
+                        result_date = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00')) if date_str else None
+                    except Exception:
+                        result_date = None
+                    if result_date and (result_date.year == now.year or (now - result_date).days <= 180):
+                        filtered_results.append(r)
+                # Apply live filtering and semantic ranking
+                live_articles = self.filter_live_results(user_input, filtered_articles)
+                live_web_results = self.filter_live_results(user_input, filtered_results)
+                filtered_articles = self.semantic_filter_and_rank(user_input, live_articles) if live_articles else self.semantic_filter_and_rank(user_input, filtered_articles)
+                filtered_results = self.semantic_filter_and_rank(user_input, live_web_results) if live_web_results else self.semantic_filter_and_rank(user_input, filtered_results)
+
+                # If we have a direct answer/summary from GNews, present it directly and optionally use LLM for context
+                gnews_summary = None
+                if filtered_articles:
+                    first_article = filtered_articles[0]
+                    gnews_summary = first_article.get('description') or first_article.get('content')
+                if gnews_summary:
+                    from langchain_groq import ChatGroq
+                    from langchain_core.messages import SystemMessage, HumanMessage
+                    from llm.config import settings
+                    system_prompt = (
+                        "You are an assistant. The following is a direct answer from a real-time news article. If helpful, add a brief, creative, or contextual expansion, but do not replace or contradict the direct answer. Only use the most recent and relevant information. If no live update is found, say so clearly."
+                    )
+                    messages = [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=f"User question: {user_input}\n\nDirect answer from news article:\n{gnews_summary}")
+                    ]
+                    llm = ChatGroq(
+                        temperature=0.2,
+                        model_name=settings.REASONING_MODEL,
+                        groq_api_key=os.getenv('GROQ_API_KEY')
+                    )
+                    result = await llm.ainvoke(messages)
+                    logger.info(f"[RealTime] Returning direct GNews answer with LLM context.")
+                    return {
+                        'success': True,
+                        'output': f"{gnews_summary}\n\n{result.content.strip()}",
+                        'agent_used': 'gnews_direct_answer',
+                        'metadata': {
+                            'tool_used': 'gnews_direct_answer',
+                            'gnews_result': gnews_result,
+                            'num_articles': len(filtered_articles)
+                        }
+                    }
+                # If we have a direct answer/summary from Brave, present it directly and optionally use LLM for context
+                if brave_summary:
+                    from langchain_groq import ChatGroq
+                    from langchain_core.messages import SystemMessage, HumanMessage
+                    from llm.config import settings
+                    system_prompt = (
+                        "You are an assistant. The following is a direct answer from a real-time web search. If helpful, add a brief, creative, or contextual expansion, but do not replace or contradict the direct answer. Only use the most recent and relevant information. If no live update is found, say so clearly."
+                    )
+                    messages = [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=f"User question: {user_input}\n\nDirect answer from web search:\n{brave_summary}")
+                    ]
+                    llm = ChatGroq(
+                        temperature=0.2,
+                        model_name=settings.REASONING_MODEL,
+                        groq_api_key=os.getenv('GROQ_API_KEY')
+                    )
+                    result = await llm.ainvoke(messages)
+                    logger.info(f"[RealTime] Returning direct Brave answer with LLM context.")
+                    return {
+                        'success': True,
+                        'output': f"{brave_summary}\n\n{result.content.strip()}",
+                        'agent_used': 'brave_direct_answer',
+                        'metadata': {
+                            'tool_used': 'brave_direct_answer',
+                            'brave_result': brave_result,
+                            'num_web_results': len(filtered_results)
+                        }
+                    }
+                # If no live or direct answer, use hybrid logic as before, but only pass the most recent and relevant results to the LLM
+                context_snippets = ""
+                if filtered_articles:
+                    context_snippets += "\n\n--- GNews Articles ---\n" + "\n\n".join([
+                        f"{a.get('title', '')}\n{a.get('description', '')}\n{a.get('url', '')}\nDate: {a.get('publishedAt', a.get('date', ''))}" for a in filtered_articles[:3]
+                    ])
+                if filtered_results:
+                    context_snippets += "\n\n--- Brave Search Results ---\n" + "\n\n".join([
+                        f"{r.get('title', '')}\n{r.get('description', '')}\n{r.get('url', '')}\nDate: {r.get('datePublished', r.get('date', ''))}" for r in filtered_results[:3]
+                    ])
+                from langchain_groq import ChatGroq
+                from langchain_core.messages import SystemMessage, HumanMessage
+                from llm.config import settings
+                system_prompt = (
+                    f"You are a real-time assistant. The user is asking for live or current updates: '{user_input}'. "
+                    "Here are the most recent and relevant search results. "
+                    "Please provide a concise, direct answer to the user's question, synthesizing only the most important information. "
+                    "Do not repeat raw snippets or unrelated details. If there is no live score, state that clearly and briefly. Limit your answer to 2-3 sentences."
+                )
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=f"User question: {user_input}")
+                ]
+                llm = ChatGroq(
+                    temperature=0.2,
+                    model_name=settings.REASONING_MODEL,
+                    groq_api_key=os.getenv('GROQ_API_KEY')
+                )
+                result = await llm.ainvoke(messages)
+                logger.info(f"[RealTime] Returning hybrid real-time + LLM answer (live/semantic filtered).")
+                # Post-processing: remove duplicate lines, limit to 2-3 sentences, strip HTML tags
+                def postprocess_response(text):
+                    # Remove HTML tags
+                    text = re.sub(r'<[^>]+>', '', text)
+                    # Remove duplicate lines
+                    lines = text.split('\n')
+                    seen = set()
+                    unique_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and line not in seen:
+                            unique_lines.append(line)
+                            seen.add(line)
+                    text = ' '.join(unique_lines)
+                    # Limit to 2-3 sentences
+                    sentences = re.split(r'(?<=[.!?]) +', text)
+                    return ' '.join(sentences[:3])
+                concise_output = postprocess_response(result.content.strip())
                 return {
                     'success': True,
-                    'output': output,
-                    'agent_used': 'brave_search',
-                    'metadata': {'tool_used': 'brave_search', 'raw_result': brave_result, 'num_results': len(web_results)}
+                    'output': concise_output,
+                    'agent_used': 'hybrid_realtime_llm',
+                    'metadata': {
+                        'tool_used': 'hybrid_realtime_llm',
+                        'gnews_result': gnews_result,
+                        'brave_result': brave_result,
+                        'num_articles': len(filtered_articles),
+                        'num_web_results': len(filtered_results)
+                    }
                 }
-            else:
-                error_msg = brave_result.get('error', 'Unknown error from Brave Search.') if isinstance(brave_result, dict) else str(brave_result)
+            try:
+                # Try the primary agent first
+                if agent_name in self.domain_agents:
+                    logger.debug(f"[Orchestrator] Using domain agent: {agent_name}")
+                    response = await self._process_with_domain_agent(
+                        agent_name=agent_name,
+                        user_input=user_input,
+                        context=context,
+                        conversation_id=conversation_id,
+                        user_id=user_id
+                    )
+                else:
+                    logger.debug(f"[Orchestrator] Using base agent: {agent_name}")
+                    response = await self._process_with_base_agent(
+                        agent_name=agent_name,
+                        user_input=user_input,
+                        context=context,
+                        conversation_id=conversation_id,
+                        user_id=user_id
+                    )
+                
+                # Check if the response indicates a need for assistance
+                needs_assistance = (
+                    not response.get('success', False) or
+                    response.get('needs_assistance', False) or
+                    (isinstance(response.get('output'), str) and 
+                     any(phrase in response['output'].lower() for phrase in 
+                         ['i don\'t know', 'i don\'t have enough information', 'i need help']))
+                )
+                
+                # If we have supporting agents and the primary agent needs help
+                if supporting_agents and needs_assistance:
+                    logger.info(f"[Orchestrator] Primary agent {agent_name} needs assistance, trying {len(supporting_agents)} supporting agents")
+                    
+                    for i, support_agent in enumerate(supporting_agents, 1):
+                        if support_agent != agent_name:  # Don't call the same agent again
+                            logger.info(f"[Orchestrator] Trying supporting agent {i}/{len(supporting_agents)}: {support_agent}")
+                            
+                            # Update context with previous attempt info
+                            support_context = {
+                                **context,
+                                'previous_agent': agent_name,
+                                'previous_response': response,
+                                'attempt_count': i,
+                                'is_fallback': False
+                            }
+                            
+                            try:
+                                support_response = await self._route_to_agent(
+                                    agent_name=support_agent,
+                                    user_input=user_input,
+                                    context=support_context,
+                                    conversation_id=conversation_id,
+                                    user_id=user_id,
+                                    supporting_agents=[a for a in supporting_agents if a != support_agent]  # Don't retry agents
+                                )
+                                
+                                # If the supporting agent was successful, use its response
+                                if support_response.get('success', False):
+                                    logger.info(f"[Orchestrator] Supporting agent {support_agent} provided a successful response")
+                                    return support_response
+                                    
+                            except Exception as e:
+                                logger.error(f"[Orchestrator] Error in supporting agent {support_agent}: {str(e)}", exc_info=True)
+                                continue
+                
+                # If we have a fallback agent and all else failed
+                if fallback_agent and (not response.get('success', False) or needs_assistance):
+                    logger.info(f"[Orchestrator] All agents failed, trying fallback agent: {fallback_agent}")
+                    try:
+                        fallback_response = await self._route_to_agent(
+                            agent_name=fallback_agent,
+                            user_input=user_input,
+                            context={
+                                **context,
+                                'is_fallback': True,
+                                'previous_attempts': [agent_name] + supporting_agents
+                            },
+                            conversation_id=conversation_id,
+                            user_id=user_id
+                        )
+                        if fallback_response.get('success', False):
+                            return fallback_response
+                    except Exception as e:
+                        logger.error(f"[Orchestrator] Error in fallback agent {fallback_agent}: {str(e)}", exc_info=True)
+                
+                # Add routing metadata to the response
+                if isinstance(response, dict):
+                    if 'metadata' not in response:
+                        response['metadata'] = {}
+                    response['metadata'].update({
+                        'routing': {
+                            'primary_agent': agent_name,
+                            'supporting_agents_attempted': supporting_agents,
+                            'processing_time_seconds': time.time() - start_time,
+                            'used_fallback': fallback_agent if (not response.get('success', False) or needs_assistance) else None
+                        }
+                    })
+                
+                return response
+                
+            except Exception as e:
+                error_msg = f"Error in agent routing for {agent_name}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                
+                # Try to use a fallback agent if available
+                if fallback_agent and fallback_agent != agent_name:
+                    logger.info(f"[Orchestrator] Error in primary agent, trying fallback: {fallback_agent}")
+                    try:
+                        return await self._route_to_agent(
+                            agent_name=fallback_agent,
+                            user_input=user_input,
+                            context={
+                                **context,
+                                'previous_error': str(e),
+                                'is_fallback': True
+                            },
+                            conversation_id=conversation_id,
+                            user_id=user_id
+                        )
+                    except Exception as fallback_error:
+                        logger.error(f"[Orchestrator] Fallback agent also failed: {str(fallback_error)}", exc_info=True)
+                
+                # If all else fails, return an error response
                 return {
                     'success': False,
-                    'output': f"Brave Search error: {error_msg}",
-                    'agent_used': 'brave_search',
-                    'metadata': {'tool_used': 'brave_search', 'error': error_msg}
-                }
-        
-        try:
-            # Try the primary agent first
-            if agent_name in self.domain_agents:
-                logger.debug(f"[Orchestrator] Using domain agent: {agent_name}")
-                response = await self._process_with_domain_agent(
-                    agent_name=agent_name,
-                    user_input=user_input,
-                    context=context,
-                    conversation_id=conversation_id,
-                    user_id=user_id
-                )
-            else:
-                logger.debug(f"[Orchestrator] Using base agent: {agent_name}")
-                response = await self._process_with_base_agent(
-                    agent_name=agent_name,
-                    user_input=user_input,
-                    context=context,
-                    conversation_id=conversation_id,
-                    user_id=user_id
-                )
-            
-            # Check if the response indicates a need for assistance
-            needs_assistance = (
-                not response.get('success', False) or
-                response.get('needs_assistance', False) or
-                (isinstance(response.get('output'), str) and 
-                 any(phrase in response['output'].lower() for phrase in 
-                     ['i don\'t know', 'i don\'t have enough information', 'i need help']))
-            )
-            
-            # If we have supporting agents and the primary agent needs help
-            if supporting_agents and needs_assistance:
-                logger.info(f"[Orchestrator] Primary agent {agent_name} needs assistance, trying {len(supporting_agents)} supporting agents")
-                
-                for i, support_agent in enumerate(supporting_agents, 1):
-                    if support_agent != agent_name:  # Don't call the same agent again
-                        logger.info(f"[Orchestrator] Trying supporting agent {i}/{len(supporting_agents)}: {support_agent}")
-                        
-                        # Update context with previous attempt info
-                        support_context = {
-                            **context,
-                            'previous_agent': agent_name,
-                            'previous_response': response,
-                            'attempt_count': i,
-                            'is_fallback': False
-                        }
-                        
-                        try:
-                            support_response = await self._route_to_agent(
-                                agent_name=support_agent,
-                                user_input=user_input,
-                                context=support_context,
-                                conversation_id=conversation_id,
-                                user_id=user_id,
-                                supporting_agents=[a for a in supporting_agents if a != support_agent]  # Don't retry agents
-                            )
-                            
-                            # If the supporting agent was successful, use its response
-                            if support_response.get('success', False):
-                                logger.info(f"[Orchestrator] Supporting agent {support_agent} provided a successful response")
-                                return support_response
-                                
-                        except Exception as e:
-                            logger.error(f"[Orchestrator] Error in supporting agent {support_agent}: {str(e)}", exc_info=True)
-                            continue
-            
-            # If we have a fallback agent and all else failed
-            if fallback_agent and (not response.get('success', False) or needs_assistance):
-                logger.info(f"[Orchestrator] All agents failed, trying fallback agent: {fallback_agent}")
-                try:
-                    fallback_response = await self._route_to_agent(
-                        agent_name=fallback_agent,
-                        user_input=user_input,
-                        context={
-                            **context,
-                            'is_fallback': True,
-                            'previous_attempts': [agent_name] + supporting_agents
-                        },
-                        conversation_id=conversation_id,
-                        user_id=user_id
-                    )
-                    if fallback_response.get('success', False):
-                        return fallback_response
-                except Exception as e:
-                    logger.error(f"[Orchestrator] Error in fallback agent {fallback_agent}: {str(e)}", exc_info=True)
-            
-            # Add routing metadata to the response
-            if isinstance(response, dict):
-                if 'metadata' not in response:
-                    response['metadata'] = {}
-                response['metadata'].update({
-                    'routing': {
-                        'primary_agent': agent_name,
-                        'supporting_agents_attempted': supporting_agents,
+                    'output': "I encountered an error while processing your request. Please try again.",
+                    'error': error_msg,
+                    'agent_used': agent_name,
+                    'metadata': {
                         'processing_time_seconds': time.time() - start_time,
-                        'used_fallback': fallback_agent if (not response.get('success', False) or needs_assistance) else None
+                        'error_type': type(e).__name__,
+                        'attempted_fallback': bool(fallback_agent and fallback_agent != agent_name)
                     }
-                })
-            
-            return response
+                }
             
         except Exception as e:
-            error_msg = f"Error in agent routing for {agent_name}: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            
-            # Try to use a fallback agent if available
-            if fallback_agent and fallback_agent != agent_name:
-                logger.info(f"[Orchestrator] Error in primary agent, trying fallback: {fallback_agent}")
-                try:
-                    return await self._route_to_agent(
-                        agent_name=fallback_agent,
-                        user_input=user_input,
-                        context={
-                            **context,
-                            'previous_error': str(e),
-                            'is_fallback': True
-                        },
-                        conversation_id=conversation_id,
-                        user_id=user_id
-                    )
-                except Exception as fallback_error:
-                    logger.error(f"[Orchestrator] Fallback agent also failed: {str(fallback_error)}", exc_info=True)
-            
-            # If all else fails, return an error response
+            logger.error(f"Error in agent routing for {agent_name}: {str(e)}", exc_info=True)
             return {
                 'success': False,
                 'output': "I encountered an error while processing your request. Please try again.",
-                'error': error_msg,
-                'agent_used': agent_name,
-                'metadata': {
-                    'processing_time_seconds': time.time() - start_time,
-                    'error_type': type(e).__name__,
-                    'attempted_fallback': bool(fallback_agent and fallback_agent != agent_name)
-                }
+                'error': str(e)
             }
     
     async def _process_with_base_agent(
@@ -1014,7 +1160,25 @@ class AgentOrchestrator:
                 return await self._handle_image_analysis(user_input, context, conversation_id, user_id)
             
             # Prepare the input with conversation history
-            history = await self._get_formatted_history(conversation_id, user_id)
+            history = await self._get_formatted_history(conversation_id, user_id, max_messages=3)
+            
+            # Truncate context to prevent token limit exceeded errors
+            def truncate_context_data(data, max_chars=2000):
+                """Truncate context data to prevent large payloads."""
+                if isinstance(data, str):
+                    return data[:max_chars] + "..." if len(data) > max_chars else data
+                elif isinstance(data, dict):
+                    truncated = {}
+                    for k, v in data.items():
+                        if isinstance(v, str) and len(v) > max_chars:
+                            truncated[k] = v[:max_chars] + "..."
+                        else:
+                            truncated[k] = v
+                    return truncated
+                return data
+            
+            # Truncate context
+            truncated_context = truncate_context_data(context)
             
             # Prepare context for the agent
             process_kwargs = {
@@ -1022,7 +1186,7 @@ class AgentOrchestrator:
                 'chat_history': history,
                 'conversation_id': conversation_id,
                 'user_id': user_id,
-                **context
+                **truncated_context
             }
             
             # Special handling for researcher agent
@@ -1266,17 +1430,18 @@ class AgentOrchestrator:
                     content = safe_get(msg, 'content', '')
                     if not isinstance(content, str):
                         content = str(content)
-                    # Truncate very long messages to prevent context overflow
-                    if len(content) > 500:
-                        content = content[:495] + '...'
+                    # More aggressive truncation: limit individual messages to 300 chars
+                    if len(content) > 300:
+                        content = content[:297] + '...'
                     formatted.append(f"{role}: {content}")
                 except Exception as msg_err:
                     logger.warning(f"Error formatting message: {msg_err}", exc_info=True)
                     continue
             joined = "\n".join(formatted) if formatted else "No conversation history available."
-            # Hard cap: if total exceeds 4000 chars, truncate from the start
-            if len(joined) > 4000:
-                joined = joined[-4000:]
+            # More aggressive truncation: if total exceeds 2000 chars, truncate from the start
+            if len(joined) > 2000:
+                joined = joined[-2000:]
+                logger.warning(f"Truncated conversation history from {len(joined) + 2000} to 2000 characters")
             return joined
         except Exception as e:
             logger.error(f"Error getting conversation history: {str(e)}", exc_info=True)
@@ -1397,5 +1562,35 @@ class AgentOrchestrator:
         ]
         result = await llm.ainvoke(messages)
         return result.content.strip()
+
+    def filter_live_results(self, user_query, results, live_window_minutes=60):
+        now = datetime.datetime.utcnow()
+        live_keywords = ['live', 'now', 'currently', 'ongoing', 'breaking', 'score', 'update', 'latest']
+        filtered = []
+        for r in results:
+            text = (r.get('title', '') + ' ' + r.get('description', '')).lower()
+            date_str = r.get('publishedAt') or r.get('date') or r.get('datePublished')
+            is_live = any(kw in user_query.lower() for kw in live_keywords) or any(kw in text for kw in live_keywords)
+            if date_str:
+                try:
+                    pub_date = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    if is_live and (now - pub_date).total_seconds() <= live_window_minutes * 60:
+                        filtered.append(r)
+                except Exception:
+                    continue
+        return filtered
+
+    def semantic_filter_and_rank(self, user_query, results, top_n=5):
+        if not self._semantic_model:
+            return results[:top_n]
+        query_emb = self._semantic_model.encode(user_query, convert_to_tensor=True)
+        scored = []
+        for r in results:
+            text = (r.get('title', '') + ' ' + r.get('description', '')).strip()
+            if text:
+                score = util.pytorch_cos_sim(query_emb, self._semantic_model.encode(text, convert_to_tensor=True)).item()
+                scored.append((score, r))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        return [r for score, r in scored[:top_n]]
 
 # ... (rest of the code remains the same)

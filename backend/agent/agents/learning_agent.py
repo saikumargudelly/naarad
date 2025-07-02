@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from enum import Enum
 import statistics
 import math
+import os
 
 from .base import BaseAgent, AgentConfig
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +49,20 @@ class AdaptationStrategy:
     success_criteria: List[str]
 
 class LearningAgent(BaseAgent):
-    """Agent specialized in learning from interactions and adapting responses."""
-    
-    def __init__(self, config: AgentConfig):
+    """Agent specialized in learning from interactions and adapting responses.
+    Modular, stateless, and uses injected memory manager for context/state.
+    """
+    def __init__(self, config: AgentConfig, memory_manager: MemoryManager = None):
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"LearningAgent initialized with memory_manager: {bool(memory_manager)}")
         self.learning_methods = self._initialize_learning_methods()
         self.adaptation_strategies = self._load_adaptation_strategies()
         self.learning_history = []
         self.user_feedback = []
         self.performance_metrics = {}
         self.adaptation_rules = {}
-        
+    
     def _initialize_learning_methods(self) -> Dict[str, Dict[str, Any]]:
         """Initialize various learning and adaptation methods."""
         return {
@@ -175,46 +180,50 @@ class LearningAgent(BaseAgent):
             ]
         }
     
-    async def process(self, input_text: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """Process learning request and generate adaptive insights."""
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"LearningAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
-            learning_type = self._classify_learning_request(input_text)
-            if learning_type == LearningType.FEEDBACK_LEARNING:
-                response = await self._analyze_feedback_learning(input_text, context)
-            elif learning_type == LearningType.PATTERN_ADAPTATION:
-                response = await self._analyze_pattern_adaptation(input_text, context)
-            elif learning_type == LearningType.PERFORMANCE_OPTIMIZATION:
-                response = await self._analyze_performance_optimization(input_text, context)
-            elif learning_type == LearningType.USER_PREFERENCE_LEARNING:
-                response = await self._analyze_user_preference_learning(input_text, context)
-            elif learning_type == LearningType.CONTEXT_ADAPTATION:
-                response = await self._analyze_context_adaptation(input_text, context)
-            else:
-                response = await self._generate_general_learning_insights(input_text, context)
-            self._update_learning_history(learning_type, input_text, response)
-            adaptations = self._generate_adaptation_recommendations(learning_type)
-            # Contextual follow-up if multiple insights/recommendations
-            insights = response.split('\n') if isinstance(response, str) else []
-            followup = ''
-            if len(insights) > 4 or (isinstance(adaptations, list) and len(adaptations) > 2):
-                followup = self._contextual_followup(input_text, insights + adaptations, domain='learning')
-                response += f"\n\n{followup}"
-            return {
-                "success": True,
-                "output": response,
-                "learning_type": learning_type.value,
-                "methods_used": self._get_used_methods(learning_type),
-                "adaptation_recommendations": adaptations,
-                "learning_metrics": self._calculate_learning_metrics(learning_type),
-                "agent": "learning_agent"
-            }
+            chat_history = kwargs.get('chat_history', '')
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Compose a context-aware prompt
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a learning assistant. Use the conversation context, topic, and intent to answer the user's question as accurately and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
+            from langchain_groq import ChatGroq
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from llm.config import settings
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
+            ]
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
         except Exception as e:
-            logger.error(f"Error in learning processing: {str(e)}", exc_info=True)
+            logger.error(f"Async error in learning process: {str(e)}", exc_info=True)
             return {
-                "success": False,
-                "output": "I'm learning from our interactions to improve my responses...",
-                "error": str(e),
-                "agent": "learning_agent"
+                'output': f"I encountered an error while processing your learning request: {str(e)}",
+                'metadata': {
+                    'error': str(e),
+                    'success': False
+                }
             }
     
     def _classify_learning_request(self, text: str) -> LearningType:

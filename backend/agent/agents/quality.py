@@ -13,17 +13,21 @@ from langchain_core.tools import BaseTool
 # Local imports
 from .base import BaseAgent, AgentConfig
 from llm.config import settings
+from agent.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
 class QualityAgent(BaseAgent):
-    """Agent specialized in refining and improving responses for quality and clarity."""
+    """Agent specialized in refining and improving responses for quality and clarity.
+    Modular, stateless, and uses injected memory manager for context/state.
+    """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], memory_manager: MemoryManager = None):
         """Initialize the quality agent with configuration.
         
         Args:
             config: The configuration for the agent. Must be a dictionary.
+            memory_manager: The memory manager for context/state injection
         """
         # Always define system_prompt first
         routing_info = config.get('routing_info', {}) if isinstance(config, dict) else {}
@@ -60,6 +64,8 @@ If the query is outside your quality domain or the intent confidence is low, esc
         default_config.update(config)
         config = default_config
         super().__init__(config)
+        self.memory_manager = memory_manager
+        logger.info(f"QualityAgent initialized with memory_manager: {bool(memory_manager)}")
     
     def _create_agent(self):
         """Create and configure the LangChain agent for quality checking.
@@ -100,76 +106,47 @@ If the query is outside your quality domain or the intent confidence is low, esc
             logger.error(f"Failed to create quality agent: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to initialize quality agent: {str(e)}") from e
     
-    def _process_impl(self, input_text: str, **kwargs) -> Dict[str, Any]:
-        """Process and improve a response using the quality agent.
-        
-        Args:
-            input_text: The response text to be checked/improved
-            **kwargs: Additional arguments including:
-                - query: The original user query that prompted the response
-                - strict: If True, enforce stricter quality checks
-                
-        Returns:
-            Dict containing the improved response and metadata
-        """
+    async def process(self, input_text: str, context: Dict[str, Any] = None, conversation_id: str = None, user_id: str = None, conversation_memory=None, **kwargs) -> Dict[str, Any]:
+        logger.info(f"QualityAgent.process called | input_text: {input_text} | conversation_id: {conversation_id} | user_id: {user_id}")
         try:
-            original_query = kwargs.pop('query', 'Unknown query')
-            current_response = input_text.strip()
-            if not current_response:
-                return {
-                    'output': '',
-                    'metadata': {
-                        'improved': False,
-                        'error': 'Empty response provided for quality check',
-                        'success': False
-                    }
-                }
-            model_config = self.agent
+            chat_history = kwargs.get('chat_history', '')
+            topic = None
+            intent = None
+            last_user_message = None
+            if conversation_memory:
+                topic = conversation_memory.topics[-1] if conversation_memory.topics else None
+                intent = conversation_memory.intents[-1] if conversation_memory.intents else None
+                for msg in reversed(conversation_memory.messages):
+                    if msg['role'] == 'user':
+                        last_user_message = msg['content']
+                        break
+            # Compose a context-aware prompt
+            context_snippets = "\n".join([
+                f"{m['role'].capitalize()}: {m['content']}" for m in conversation_memory.messages[-6:]
+            ]) if conversation_memory else ""
+            system_prompt = (
+                "You are a quality assurance assistant. Use the conversation context, topic, and intent to answer the user's question as accurately and helpfully as possible. "
+                "If the user is following up, use the previous context to disambiguate."
+            )
             from langchain_groq import ChatGroq
-            from langchain.schema import HumanMessage, SystemMessage
-            llm = ChatGroq(
-                temperature=model_config['temperature'],
-                model_name=model_config['model_name'],
-                groq_api_key=model_config['api_key']
-            )
-            prompt = self._prompt_template.format(
-                query=original_query,
-                response=current_response
-            )
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from llm.config import settings
             messages = [
-                SystemMessage(content="You are a helpful assistant that improves response quality."),
-                HumanMessage(content=prompt)
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Conversation context:\n{context_snippets}\n\nTopic: {topic}\nIntent: {intent}\n\nUser question: {input_text}")
             ]
-            result = llm.invoke(messages)
-            improved_response = result.content.strip()
-            if improved_response.upper() == 'NO_CHANGE':
-                return {
-                    'output': current_response,
-                    'metadata': {
-                        'improved': False,
-                        'success': True
-                    }
-                }
-            is_improved = improved_response != current_response
-            # Contextual follow-up if multiple suggestions/improvements
-            suggestions = improved_response.split('\n') if isinstance(improved_response, str) else []
-            followup = ''
-            if len(suggestions) > 4:
-                followup = self._contextual_followup(original_query, suggestions, domain='quality')
-                improved_response += f"\n\n{followup}"
-            return {
-                'output': improved_response,
-                'metadata': {
-                    'improved': is_improved,
-                    'success': True
-                }
-            }
+            llm = ChatGroq(
+                temperature=0.2,
+                model_name=settings.REASONING_MODEL,
+                groq_api_key=os.getenv('GROQ_API_KEY')
+            )
+            result = await llm.ainvoke(messages)
+            return {"output": result.content.strip(), "metadata": {"success": True, "topic": topic, "intent": intent}}
         except Exception as e:
-            logger.error(f"Error in quality check: {str(e)}", exc_info=True)
+            logger.error(f"Async error in quality process: {str(e)}", exc_info=True)
             return {
-                'output': current_response,
+                'output': f"I encountered an error while processing your quality request: {str(e)}",
                 'metadata': {
-                    'improved': False,
                     'error': str(e),
                     'success': False
                 }

@@ -14,6 +14,7 @@ import os
 
 from dependencies import get_voice_agent
 from config.config import settings
+from agent.factory import create_orchestrator_with_agents
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -38,24 +39,22 @@ async def process_voice_input(request: VoiceProcessRequest):
     Process voice input and return transcribed text with optional audio response.
     """
     logger.info(f"Processing voice input for user: {request.user_id}")
-    
     try:
         start_time = datetime.utcnow()
-        
-        # Process voice input
-        voice_agent = get_voice_agent()
-        result = await voice_agent.process_voice_input(
-            audio_data=request.audio_data,
+        orchestrator = create_orchestrator_with_agents()
+        conversation_id = f"voice_{request.user_id}_{start_time.timestamp()}"
+        # Use orchestrator to process the voice input (audio_data as input_text)
+        result = await orchestrator.process_query(
+            user_input=request.audio_data,
             context={
-                "user_id": request.user_id,
                 "voice": request.voice_preference,
                 "generate_audio": request.generate_audio,
                 **request.context
-            }
+            },
+            conversation_id=conversation_id,
+            user_id=request.user_id
         )
-        
         process_time = (datetime.utcnow() - start_time).total_seconds()
-        
         if result.get("success", False):
             return {
                 "success": True,
@@ -71,7 +70,6 @@ async def process_voice_input(request: VoiceProcessRequest):
                 status_code=500,
                 detail=f"Voice processing failed: {result.get('error', 'Unknown error')}"
             )
-            
     except Exception as e:
         logger.error(f"Error processing voice input: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -90,31 +88,26 @@ async def upload_audio_file(
     Upload and process audio file.
     """
     logger.info(f"Processing uploaded audio file: {file.filename}")
-    
     try:
-        # Validate file type
         if not file.content_type.startswith('audio/'):
             raise HTTPException(
                 status_code=400,
                 detail="File must be an audio file"
             )
-        
-        # Read file content
         content = await file.read()
         audio_base64 = base64.b64encode(content).decode('utf-8')
-        
-        # Process with voice agent
-        voice_agent = get_voice_agent()
-        result = await voice_agent.process_voice_input(
-            audio_data=audio_base64,
+        orchestrator = create_orchestrator_with_agents()
+        conversation_id = f"voice_{user_id}_{datetime.utcnow().timestamp()}"
+        result = await orchestrator.process_query(
+            user_input=audio_base64,
             context={
-                "user_id": user_id,
                 "voice": voice_preference,
                 "generate_audio": generate_audio,
                 "filename": file.filename
-            }
+            },
+            conversation_id=conversation_id,
+            user_id=user_id
         )
-        
         if result.get("success", False):
             return {
                 "success": True,
@@ -129,7 +122,6 @@ async def upload_audio_file(
                 status_code=500,
                 detail=f"Voice processing failed: {result.get('error', 'Unknown error')}"
             )
-            
     except Exception as e:
         logger.error(f"Error processing uploaded audio: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -218,7 +210,7 @@ async def test_voice_features(request: VoiceTestRequest):
         elif request.test_type == "full" and request.audio_data:
             # Test full voice processing pipeline
             voice_agent = get_voice_agent()
-            result = await voice_agent.process_voice_input(
+            result = await voice_agent.process_query(
                 audio_data=request.audio_data,
                 context={"generate_audio": True}
             )
